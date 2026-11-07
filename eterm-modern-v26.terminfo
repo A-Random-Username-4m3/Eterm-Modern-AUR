@@ -1,0 +1,15 @@
+# Eterm modernization fork v25+.
+# Keep conventional Eterm-256color behavior as the default: do NOT advertise
+# truecolor unless the user intentionally selects the -direct entry.
+# Inherits the upstream Eterm key definitions rather than pretending to be xterm.
+Eterm-modern-256color|Modernized Eterm with 256 indexed colors,
+    use=Eterm-256color,
+
+# Optional opt-in entry for applications that query extended RGB capabilities.
+# SGR 38;2 and 48;2 are implemented by the v25 TrueColor source patch.
+# The default Eterm-modern-256color entry intentionally has no RGB/Tc flag.
+Eterm-modern-direct|Modernized Eterm with opt-in 24-bit RGB colors,
+    Tc, RGB,
+    setrgbf=\E[38;2;%p1%d;%p2%d;%p3%dm,
+    setrgbb=\E[48;2;%p1%d;%p2%d;%p3%dm,
+    use=Eterm-modern-256color,

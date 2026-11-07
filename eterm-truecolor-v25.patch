@@ -1,0 +1,434 @@
+diff --git a/src/screen.c b/src/screen.c
+index 7cc8430..dceff00 100644
+--- a/src/screen.c
++++ b/src/screen.c
+@@ -367,6 +367,8 @@ eterm_wide_repair_row(int row, rend_t style)
+                             TERM_WINDOW_GET_REPORTED_COLS(), style);
+ }
+ 
++/* Forward declaration: both Xft and core-font paths resolve the same RGB pixels. */
++static Pixel eterm_rend_pixel(rend_t style, int background);
+ static XftDraw *eterm_xft_draw = NULL;
+ 
+ /* Opt-in same rasterizer for ASCII and Unicode; old mode remains available. */
+@@ -911,6 +913,7 @@ eterm_unicode_draw_cell(Drawable target, int row, int col,
+                         FcChar32 cp, rend_t attrs)
+ {
+     int fg, bg, style, swap_tmp, x, y, span, ncols;
++    Pixel pixel_swap;
+     XColor xcolor;
+     XftColor color;
+     XRectangle clip;
+@@ -927,18 +930,23 @@ eterm_unicode_draw_cell(Drawable target, int row, int col,
+ 
+     fg = GET_FGCOLOR(attrs);
+     bg = GET_BGCOLOR(attrs);
+-    style = GET_ATTR(attrs);
+-    if (style & RS_RVid)
+-        SWAP_IT(fg, bg, swap_tmp);
+-    if (style & RS_Select)
+-        SWAP_IT(fg, bg, swap_tmp);
+-    if ((style & RS_Cursor) && TermWin.focus)
+-        SWAP_IT(fg, bg, swap_tmp);
++    style = (int) GET_ATTR(attrs);
++    xcolor.pixel = eterm_rend_pixel(attrs, 0);
++    {
++        Pixel bg_pixel = eterm_rend_pixel(attrs, 1);
++        if (((style & RS_RVid) != 0) ^ ((style & RS_Select) != 0) ^
++            (((style & RS_Cursor) != 0) && TermWin.focus)) {
++            SWAP_IT(fg, bg, swap_tmp);
++            SWAP_IT(xcolor.pixel, bg_pixel, pixel_swap);
++        }
++    }
+ #ifndef NO_BOLDUNDERLINE
+-    if ((style & RS_Bold) && fg == fgColor && bg != colorBD)
+-        fg = colorBD;
+-    else if ((style & RS_Uline) && fg == fgColor && bg != colorUL)
+-        fg = colorUL;
++    if (!(attrs & (RS_FGTrue | RS_BGTrue)) &&
++        (style & RS_Bold) && fg == fgColor && bg != colorBD)
++        xcolor.pixel = PixColors[colorBD];
++    else if (!(attrs & (RS_FGTrue | RS_BGTrue)) &&
++             (style & RS_Uline) && fg == fgColor && bg != colorUL)
++        xcolor.pixel = PixColors[colorUL];
+ #endif
+ 
+     clip.x = (short) Col2Pixel(col);
+@@ -946,7 +954,6 @@ eterm_unicode_draw_cell(Drawable target, int row, int col,
+     clip.width = (unsigned short) (TermWin.fwidth * span);
+     clip.height = (unsigned short) TermWin.fheight;
+ 
+-    xcolor.pixel = PixColors[fg];
+     XQueryColor(Xdisplay, cmap, &xcolor);
+     /* Bitmap and Xft use the same foreground color and clipping area. */
+     if (eterm_bitmap_draw(target, cp, row, col, span, xcolor.pixel, &clip))
+@@ -1374,6 +1381,64 @@ scr_change_screen(int scrn)
+     return scrn;
+ }
+ 
++/* Convert 8-bit RGB components into the actual X11 TrueColor visual's
++ * bit masks. We avoid allocating one X server colormap entry per RGB color.
++ * Indexed colors remain in the historical PixColors[] theme palette. */
++static Pixel
++eterm_truecolor_component(unsigned int channel, unsigned long mask)
++{
++    unsigned long shifted, scale;
++    unsigned int nshift = 0;
++    if (!mask)
++        return 0;
++    while (!(mask & 1UL)) {
++        mask >>= 1;
++        ++nshift;
++    }
++    shifted = mask;
++    scale = (unsigned long) ((channel * shifted + 127UL) / 255UL);
++    return (Pixel) (scale << nshift);
++}
++
++static Pixel
++eterm_rend_pixel(rend_t style, int background)
++{
++    unsigned int rgb, index;
++    if (background) {
++        if (!(style & RS_BGTrue)) {
++            index = GET_BGCOLOR(style);
++            return PixColors[index < ETERM_COLOR_STORAGE ? index : bgColor];
++        }
++        rgb = GET_BGRGB(style);
++    } else {
++        if (!(style & RS_FGTrue)) {
++            index = GET_FGCOLOR(style);
++            return PixColors[index < ETERM_COLOR_STORAGE ? index : fgColor];
++        }
++        rgb = GET_FGRGB(style);
++    }
++    if (!Xvisual || Xvisual->class != TrueColor)
++        return PixColors[background ? bgColor : fgColor];
++    return eterm_truecolor_component((rgb >> 16) & 255u, Xvisual->red_mask) |
++           eterm_truecolor_component((rgb >> 8) & 255u, Xvisual->green_mask) |
++           eterm_truecolor_component(rgb & 255u, Xvisual->blue_mask);
++}
++
++/* Called for SGR 38;2;r;g;b and 48;2;r;g;b on TrueColor visuals. */
++void
++scr_color_rgb(unsigned int red, unsigned int green, unsigned int blue,
++              unsigned int intensity)
++{
++    unsigned int rgb;
++    if (red > 255u || green > 255u || blue > 255u)
++        return;
++    rgb = (red << 16) | (green << 8) | blue;
++    if (intensity == RS_Bold)
++        rstyle = SET_FGRGB(rstyle, rgb);
++    else if (intensity == RS_Blink)
++        rstyle = SET_BGRGB(rstyle, rgb);
++}
++
+ /*
+  * Change the color for following text
+  */
+@@ -1443,7 +1508,7 @@ void
+ scr_rendition(int set, int style)
+ {
+     unsigned int color;
+-    int old_style = rstyle;
++    rend_t old_style = rstyle;
+ 
+     D_SCREEN(("scr_rendition(%d, %d) called.\n", set, style));
+     if (set) {
+@@ -1455,10 +1520,14 @@ scr_rendition(int set, int style)
+                     rstyle &= ~RS_RVid;
+                 break;
+             case RS_Bold:
++                if (rstyle & RS_FGTrue)
++                    break;
+                 color = GET_FGCOLOR(rstyle);
+                 scr_color((color == fgColor ? GET_FGCOLOR(colorfgbg) : color), RS_Bold);
+                 break;
+             case RS_Blink:
++                if (rstyle & RS_BGTrue)
++                    break;
+                 color = GET_BGCOLOR(rstyle);
+                 scr_color((color == bgColor ? GET_BGCOLOR(colorfgbg) : color), RS_Blink);
+                 break;
+@@ -1476,6 +1545,8 @@ scr_rendition(int set, int style)
+                     rstyle |= RS_RVid;
+                 break;
+             case RS_Bold:
++                if (rstyle & RS_FGTrue)
++                    break;
+                 color = GET_FGCOLOR(rstyle);
+                 if (color >= minBright && color <= maxBright) {
+                     scr_color(color, RS_Bold);
+@@ -1484,6 +1555,8 @@ scr_rendition(int set, int style)
+                 }
+                 break;
+             case RS_Blink:
++                if (rstyle & RS_BGTrue)
++                    break;
+                 color = GET_BGCOLOR(rstyle);
+                 if (color >= minBright && color <= maxBright) {
+                     scr_color(color, RS_Blink);
+@@ -2055,12 +2128,12 @@ scr_erase_screen(int mode)
+         if (rstyle & RS_RVid || rstyle & RS_Uline || rstyle & RS_Overscore)
+             ren = -1;
+         else {
+-            if (GET_BGCOLOR(rstyle) == bgColor) {
++            if (!(rstyle & RS_BGTrue) && GET_BGCOLOR(rstyle) == bgColor) {
+                 ren = DEFAULT_RSTYLE;
+                 CLEAR_ROWS(row, num);
+             } else {
+-                ren = (rstyle & (RS_fgMask | RS_bgMask));
+-                gcvalue.foreground = PixColors[GET_BGCOLOR(ren)];
++                ren = (rstyle & (RS_fgMask | RS_bgMask | RS_FGTrue | RS_BGTrue));
++                gcvalue.foreground = eterm_rend_pixel(ren, 1);
+                 gcmask = GCForeground;
+                 XChangeGC(Xdisplay, TermWin.gc, gcmask, &gcvalue);
+                 ERASE_ROWS(row, num);
+@@ -2668,13 +2741,14 @@ scr_refresh(int type)
+         wbyte,                  /* we're in multibyte                        */
+         xpixel,                 /* x offset for start of drawing (font)      */
+         ypixel;                 /* y offset for start of drawing (font)      */
+-    register int col, row,      /* column/row we're processing               */
+-     rend;                      /* rendition                                 */
++    register int col, row;      /* column/row we're processing               */
++    rend_t rend;                /* full 64-bit rendition, including RGB     */
+     static int focus = -1;      /* screen in focus?                          */
+     long gcmask;                /* Graphics Context mask                     */
+     unsigned long ltmp;
+     rend_t rt1, rt2,            /* tmp rend values                           */
+-     lastrend;                  /* rend type of last char in drawing set     */
++     lastrend, cell_rend;       /* full color/style for the current run      */
++    Pixel fore_pixel, back_pixel;
+     text_t lasttext;            /* last char being replaced in drawing set   */
+     rend_t *drp, *srp;          /* drawn-rend-pointer, screen-rend-pointer   */
+     text_t *dtp, *stp;          /* drawn-text-pointer, screen-text-pointer   */
+@@ -2847,7 +2921,7 @@ scr_refresh(int type)
+                         drp[col] = srp[col];
+                         buffer[len++] = eterm_legacy_glyph(stp[col], srp[col]);
+                         col++;
+-                        if ((col == ncols) || (srp[col] != (unsigned int) rend))
++                        if ((col == ncols) || (srp[col] != rend))
+                             break;
+                         if ((stp[col] == dtp[col])
+                             && (srp[col] == drp[col])
+@@ -2886,7 +2960,7 @@ scr_refresh(int type)
+ #endif
+                     /* single stepping - `normal' mode */
+                     for (; ++col < ncols - 1;) {
+-                        if ((unsigned int) rend != srp[col])
++                        if (rend != srp[col])
+                             break;
+                         if ((stp[col] == dtp[col]) && (srp[col] == drp[col]))
+                             break;
+@@ -2907,9 +2981,12 @@ scr_refresh(int type)
+             buffer[len] = '\0';
+ 
+             /* Determine the attributes for the string */
+-            fore = GET_FGCOLOR(rend);
+-            back = GET_BGCOLOR(rend);
+-            rend = GET_ATTR(rend);
++            cell_rend = rend;
++            fore = GET_FGCOLOR(cell_rend);
++            back = GET_BGCOLOR(cell_rend);
++            fore_pixel = eterm_rend_pixel(cell_rend, 0);
++            back_pixel = eterm_rend_pixel(cell_rend, 1);
++            rend = GET_ATTR(cell_rend);
+             gcmask = 0;
+             rvid = (rend & RS_RVid) ? 1 : 0;
+             if (rend & RS_Select)
+@@ -2939,14 +3016,16 @@ scr_refresh(int type)
+                             buffer[i] = 0x1e;
+                     break;
+             }
+-            if (rvid)
++            if (rvid) {
+                 SWAP_IT(fore, back, i);
+-            if (back != bgColor) {
+-                gcvalue.background = PixColors[back];
++                SWAP_IT(fore_pixel, back_pixel, ltmp);
++            }
++            if (back_pixel != PixColors[bgColor]) {
++                gcvalue.background = back_pixel;
+                 gcmask |= GCBackground;
+             }
+-            if (fore != fgColor) {
+-                gcvalue.foreground = PixColors[fore];
++            if (fore_pixel != PixColors[fgColor]) {
++                gcvalue.foreground = fore_pixel;
+                 gcmask |= GCForeground;
+             }
+ #ifndef NO_BOLDUNDERLINE
+@@ -4574,14 +4653,24 @@ debug_colors(void)
+         color -= (minBright - minColor);
+         fprintf(stderr, "bright ");
+     }
+-    fprintf(stderr, "%s on ", name[color]);
++    if (rstyle & RS_FGTrue)
++        fprintf(stderr, "#%06x on ", GET_FGRGB(rstyle));
++    else if (color < 10)
++        fprintf(stderr, "%s on ", name[color]);
++    else
++        fprintf(stderr, "palette %d on ", color);
+ 
+     color = GET_BGCOLOR(rstyle);
+     if (color >= minBright && color <= maxBright) {
+         color -= (minBright - minColor);
+         fprintf(stderr, "bright ");
+     }
+-    fprintf(stderr, "%s\n", name[color]);
++    if (rstyle & RS_BGTrue)
++        fprintf(stderr, "#%06x\n", GET_BGRGB(rstyle));
++    else if (color < 10)
++        fprintf(stderr, "%s\n", name[color]);
++    else
++        fprintf(stderr, "palette %d\n", color);
+ }
+ 
+ #ifdef USE_XIM
+diff --git a/src/screen.h b/src/screen.h
+index 34440d5..bde31e1 100644
+--- a/src/screen.h
++++ b/src/screen.h
+@@ -101,40 +101,50 @@ enum {
+ };
+ 
+ #ifdef MULTI_CHARSET
+-#define RS_multi1       0x80000000u /* multibyte 1st byte */
+-#define RS_multi0       0x40000000u /* only multibyte characters */
+-#define RS_multi2       (RS_multi0|RS_multi1)   /* multibyte 2nd byte */
+-#define RS_multiMask    (RS_multi0|RS_multi1)   /* multibyte mask */
++#define RS_multi1       UINT64_C(0x00002000) /* multibyte first cell */
++#define RS_multi0       UINT64_C(0x00001000) /* multibyte second cell */
++#define RS_multi2       (RS_multi0|RS_multi1)
++
++#define RS_multiMask    (RS_multi0|RS_multi1)
+ #endif
+-#define RS_ukFont       0x20000000u /* UK character set */
+-#define RS_acsFont      0x10000000u /* ACS graphics character set */
++#define RS_ukFont       UINT64_C(0x00000800)
++#define RS_acsFont      UINT64_C(0x00000400)
+ #define RS_fontMask     (RS_acsFont|RS_ukFont)
+-#define RS_Uline        0x08000000u /* underline */
+-#define RS_RVid         0x04000000u /* reverse video */
+-#define RS_Select       0x02000000u /* selected text */
+-#define RS_Cursor       0x01000000u /* cursor location */
+-#define RS_Blink        0x00800000u /* blink */
+-#define RS_Conceal      0x00400000u /* conceal */
+-#define RS_Dim          0x00200000u /* dim (apply alpha) */
+-#define RS_Bold         0x00100000u /* bold */
+-#define RS_Italic       0x00080000u /* italic */
+-#define RS_Overscore    0x00040000u /* overscore */
+-#define RS_fgMask       0x0003FE00u /* 512 colors */
+-#define RS_bgMask       0x000001FFu /* 512 colors */
+-#define RS_None         0x00000000u /* Normal */
+-
+-#define RS_attrMask     (0xFF000000u|RS_Overscore|RS_Italic|RS_Bold|RS_Dim|RS_Conceal|RS_Blink)
+ 
+-/* how to build & extract colors and attributes */
+-#define GET_FGCOLOR(r)        (((r) & RS_fgMask)>>9)
+-#define GET_BGCOLOR(r)        (((r) & RS_bgMask))
+-#define GET_ATTR(r)           (((r) & RS_attrMask))
+-#define GET_BGATTR(r)         (((r) & (RS_attrMask | RS_bgMask)))
++#define RS_Uline        UINT64_C(0x00000200)
++#define RS_RVid         UINT64_C(0x00000100)
++#define RS_Select       UINT64_C(0x00000080)
++#define RS_Cursor       UINT64_C(0x00000040)
++#define RS_Blink        UINT64_C(0x00000020)
++#define RS_Conceal      UINT64_C(0x00000010)
++#define RS_Dim          UINT64_C(0x00000008)
++#define RS_Bold         UINT64_C(0x00000004)
++#define RS_Italic       UINT64_C(0x00000002)
++#define RS_Overscore    UINT64_C(0x00000001)
++#define RS_attrMask     UINT64_C(0x0000000000003fff)
++#define RS_FGTrue       UINT64_C(0x0000000000004000)
++#define RS_BGTrue       UINT64_C(0x0000000000008000)
++#define RS_fgMask       UINT64_C(0x000000ffffff0000)
++#define RS_bgMask       UINT64_C(0xffffff0000000000)
++#define RS_None         0u
+ 
+-#define SET_FGCOLOR(r,fg)     (((r) & ~RS_fgMask)  | ((fg)<<9))
+-#define SET_BGCOLOR(r,bg)     (((r) & ~RS_bgMask)  | (bg))
+-#define SET_ATTR(r,a)         (((r) & ~RS_attrMask)| (a))
+-#define DEFAULT_RSTYLE        (RS_None | (fgColor<<9) | (bgColor))
++/* 64-bit rendition: [24-bit BG] [24-bit FG] [RGB flags] [14 attributes].
++ * Each 24-bit field holds a palette index (0..511) unless the corresponding
++ * RS_*True bit is set. No eviction, approximation or global RGB slot limit. */
++#define GET_FGRGB(r)          ((unsigned int)(((rend_t)(r) >> 16) & UINT64_C(0xffffff)))
++#define GET_BGRGB(r)          ((unsigned int)(((rend_t)(r) >> 40) & UINT64_C(0xffffff)))
++#define GET_FGCOLOR(r)        (((r) & RS_FGTrue) ? fgColor : GET_FGRGB(r))
++#define GET_BGCOLOR(r)        (((r) & RS_BGTrue) ? bgColor : GET_BGRGB(r))
++#define GET_ATTR(r)           ((r) & RS_attrMask)
++/* Conservative refresh rule for spaces: compare complete rendition so that
++ * a changed truecolor background never remains stale. */
++#define GET_BGATTR(r)         ((r) & (RS_attrMask | RS_BGTrue | RS_bgMask | RS_FGTrue | RS_fgMask))
++#define SET_FGCOLOR(r,fg)     ((((rend_t)(r)) & ~(RS_fgMask | RS_FGTrue)) | (((rend_t)(fg) & UINT64_C(0xffffff)) << 16))
++#define SET_BGCOLOR(r,bg)     ((((rend_t)(r)) & ~(RS_bgMask | RS_BGTrue)) | (((rend_t)(bg) & UINT64_C(0xffffff)) << 40))
++#define SET_FGRGB(r,rgb)      (SET_FGCOLOR((r),(rgb)) | RS_FGTrue)
++#define SET_BGRGB(r,rgb)      (SET_BGCOLOR((r),(rgb)) | RS_BGTrue)
++#define SET_ATTR(r,a)         ((((rend_t)(r)) & ~RS_attrMask) | ((rend_t)(a) & RS_attrMask))
++#define DEFAULT_RSTYLE        (SET_BGCOLOR(SET_FGCOLOR(RS_None,fgColor),bgColor))
+ 
+ /* screen_t flags */
+ #define Screen_Relative       (1<<0)    /* relative origin mode flag         */
+@@ -159,7 +169,7 @@ enum {
+ typedef uint32_t text_t;
+ /* Internal second cell of a two-column Unicode scalar; never valid UTF-8. */
+ #define ETERM_WIDE_TRAIL ((text_t) 0x110000u)
+-typedef unsigned int rend_t;
++typedef uint64_t rend_t;
+ typedef enum {
+     SELECTION_CLEAR = 0,
+     SELECTION_INIT,
+@@ -230,7 +240,7 @@ typedef struct {
+ } selection_t;
+ 
+ /************ Variables ************/
+-extern unsigned int colorfgbg;
++extern rend_t colorfgbg;
+ extern unsigned char refresh_all;
+ #ifdef MULTI_CHARSET
+ extern encoding_t encoding_method;
+@@ -251,6 +261,7 @@ extern void scr_poweron(void);
+ extern void scr_cursor(int);
+ extern int scr_change_screen(int);
+ extern void scr_color(unsigned int, unsigned int);
++extern void scr_color_rgb(unsigned int, unsigned int, unsigned int, unsigned int);
+ extern void scr_rendition(int, int);
+ extern int scroll_text(int, int, int, int);
+ extern void scr_add_lines(const unsigned char *, int, int);
+diff --git a/src/startup.c b/src/startup.c
+index c55f908..f3fb35e 100644
+--- a/src/startup.c
++++ b/src/startup.c
+@@ -67,7 +67,7 @@ TermWin_t TermWin;
+ Display *Xdisplay;              /* display */
+ Colormap cmap;
+ char *display_name = NULL;
+-unsigned int colorfgbg;
++rend_t colorfgbg;
+ Atom props[NUM_PROPS];
+ 
+ int
+diff --git a/src/term.c b/src/term.c
+index 66a9423..14b94d3 100644
+--- a/src/term.c
++++ b/src/term.c
+@@ -2048,9 +2048,14 @@ process_sgr_mode(unsigned int nargs, int arg[])
+                         if (arg[i + 2] >= 0 && arg[i + 2] <= 255 &&
+                             arg[i + 3] >= 0 && arg[i + 3] <= 255 &&
+                             arg[i + 4] >= 0 && arg[i + 4] <= 255) {
+-                            scr_color(eterm_rgb_color((unsigned int) arg[i + 2],
+-                                                      (unsigned int) arg[i + 3],
+-                                                      (unsigned int) arg[i + 4]), target);
++                            if (Xvisual && Xvisual->class == TrueColor)
++                                scr_color_rgb((unsigned int) arg[i + 2],
++                                              (unsigned int) arg[i + 3],
++                                              (unsigned int) arg[i + 4], target);
++                            else
++                                scr_color(eterm_rgb_color((unsigned int) arg[i + 2],
++                                                          (unsigned int) arg[i + 3],
++                                                          (unsigned int) arg[i + 4]), target);
+                         }
+                         i += 4;
+                     } else {

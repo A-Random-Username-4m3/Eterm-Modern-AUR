@@ -1,0 +1,2307 @@
+diff --git a/src/command.c b/src/command.c
+index 45b7253..28f5ab8 100644
+--- a/src/command.c
++++ b/src/command.c
+@@ -1561,7 +1561,7 @@ get_tty(void)
+      * child processes remain alive upon deletion of the window.
+      */
+     {
+-        unsigned short i;
++        long i;
+         unsigned long max_fds;
+ 
+         /* get number of available file descriptors */
+@@ -2822,7 +2822,7 @@ matrix(int n)
+ {
+     int x, y, w, f;
+     int ys = TermWin.saveLines - TermWin.view_start;
+-    text_t *s = MALLOC(TERM_WINDOW_GET_COLS());
++    text_t *s = MALLOC(sizeof(text_t) * TERM_WINDOW_GET_COLS());
+     text_t *t, *t2;
+     rend_t *r, *r2;
+ 
+@@ -2831,7 +2831,7 @@ matrix(int n)
+         return;
+     }
+ 
+-    MEMSET(s, 0, TERM_WINDOW_GET_COLS());
++    MEMSET(s, 0, sizeof(text_t) * TERM_WINDOW_GET_COLS());
+ #define MATRIX_HI CLEAR
+ #define MATRIX_LO ((4<<8)|CLEAR)
+ 
+diff --git a/src/command.h b/src/command.h
+index 13c3502..065642a 100644
+--- a/src/command.h
++++ b/src/command.h
+@@ -100,7 +100,9 @@
+ # define PrivMode_scrollbar	(1LU<<14)
+ # define PrivMode_menuBar	(1LU<<15)
+ 
+-#define PrivMode_mouse_report (PrivMode_MouseX10|PrivMode_MouseX11)
++# define PrivMode_MouseDrag (1LU<<16) /* DECSET 1002 */
++# define PrivMode_MouseSGR  (1LU<<17) /* DECSET 1006 */
++#define PrivMode_mouse_report (PrivMode_MouseX10|PrivMode_MouseX11|PrivMode_MouseDrag)
+ #define PrivMode(test,bit) do {\
+ if (test) PrivateModes |= (bit); else PrivateModes &= ~(bit);} while (0)
+ 
+diff --git a/src/events.c b/src/events.c
+index af92693..d44c3b0 100644
+--- a/src/events.c
++++ b/src/events.c
+@@ -583,7 +583,11 @@ handle_selection_clear(event_t *ev)
+ 
+     D_EVENTS(("handle_selection_clear(ev [%8p] on window 0x%08x)\n", ev, ev->xany.window));
+ 
+-    selection_clear();
++    if (ev->xselectionclear.selection == props[PROP_CLIPBOARD]) {
++        selection_clipboard_lost();
++    } else {
++        selection_clear();
++    }
+     return 1;
+ }
+ 
+@@ -593,7 +597,14 @@ handle_selection_notify(event_t *ev)
+ 
+     D_EVENTS(("handle_selection_notify(ev [%8p] on window 0x%08x)\n", ev, ev->xany.window));
+ 
+-    selection_fetch(ev->xselection.requestor, ev->xselection.property, True);
++    if (ev->xselection.property == None &&
++        ev->xselection.target == props[PROP_UTF8_STRING] &&
++        IS_SELECTION(ev->xselection.selection)) {
++        XConvertSelection(Xdisplay, ev->xselection.selection, XA_STRING,
++                          props[PROP_SELECTION_DEST], TermWin.vt, CurrentTime);
++    } else {
++        selection_fetch(ev->xselection.requestor, ev->xselection.property, True);
++    }
+     return 1;
+ }
+ 
+@@ -668,7 +679,10 @@ handle_button_press(event_t *ev)
+ #else
+                 button_state.clicks = 1;
+ #endif /* MOUSE_REPORT_DOUBLECLICK */
+-                mouse_report(&(ev->xbutton));
++                if (PrivateModes & PrivMode_MouseSGR)
++                    mouse_report_extended(&(ev->xbutton), 0, 0);
++                else
++                    mouse_report(&(ev->xbutton));
+             } else {
+                 switch (ev->xbutton.button) {
+                     case Button1:
+@@ -778,14 +792,15 @@ handle_button_release(event_t *ev)
+     if (ev->xany.window == TermWin.vt) {
+         if (ev->xbutton.subwindow == None) {
+             if (button_state.report_mode) {
+-                switch (PrivateModes & PrivMode_mouse_report) {
+-                    case PrivMode_MouseX10:
+-                        break;
+-                    case PrivMode_MouseX11:
++                /* Mode 9 only reports presses. Mouse-wheel releases are ignored. */
++                if (!(PrivateModes & PrivMode_MouseX10) && ev->xbutton.button <= Button3) {
++                    if (PrivateModes & PrivMode_MouseSGR) {
++                        mouse_report_extended(&(ev->xbutton), 1, 0);
++                    } else {
+                         ev->xbutton.state = button_state.bypass_keystate;
+                         ev->xbutton.button = AnyButton;
+                         mouse_report(&(ev->xbutton));
+-                        break;
++                    }
+                 }
+                 return (1);
+             }
+@@ -827,6 +842,27 @@ handle_motion_notify(event_t *ev)
+     COUNT_EVENT(motion_cnt);
+ 
+     REQUIRE_RVAL(XEVENT_IS_MYWIN(ev, &primary_data), 0);
++    /* DECSET 1002: report movement while a button is held. */
++    if (ev->xany.window == TermWin.vt &&
++        (PrivateModes & PrivMode_MouseDrag) &&
++        !button_state.bypass_keystate) {
++        XButtonEvent report = ev->xbutton;
++        if (ev->xmotion.state & Button1Mask)
++            report.button = Button1;
++        else if (ev->xmotion.state & Button2Mask)
++            report.button = Button2;
++        else if (ev->xmotion.state & Button3Mask)
++            report.button = Button3;
++        else
++            report.button = AnyButton;
++        if (report.button != AnyButton) {
++            mouse_report_extended(&report, 0, 1);
++            PROF_DONE(handle_motion_notify);
++            PROF_TIME(handle_motion_notify);
++            return 1;
++        }
++    }
++
+ 
+ #ifdef HAVE_TWIN
+     /* It's really silly that Twin uses mouse drag codes that are
+diff --git a/src/screen.c b/src/screen.c
+index 7071075..7cc8430 100644
+--- a/src/screen.c
++++ b/src/screen.c
+@@ -11,6 +11,7 @@ static const char cvs_ident[] = "$Id: screen.c 51650 2010-08-26 01:34:13Z lucas
+ /* includes */
+ #include <stdio.h>
+ #include <stdlib.h>
++#include <string.h>
+ #ifdef HAVE_SYS_TIME_H
+ # include <sys/time.h>
+ #endif
+@@ -26,6 +27,9 @@ static const char cvs_ident[] = "$Id: screen.c 51650 2010-08-26 01:34:13Z lucas
+ #include <errno.h>
+ #include <X11/Xatom.h>
+ #include <X11/Xmd.h>            /* CARD32 */
++#include <X11/Xft/Xft.h>            /* Unicode glyph drawing */
++#include <wchar.h>                /* wcwidth and wchar_t */
++#include <utf8proc.h>             /* Unicode category and NFC composition */
+ 
+ #include "buttons.h"
+ #include "command.h"
+@@ -77,6 +81,20 @@ static selection_t selection = {
+     {0, 0}
+ };
+ 
++/* CLIPBOARD owns a snapshot; mouse selection continues to use PRIMARY. */
++static unsigned char *eterm_clipboard_text = NULL;
++static size_t eterm_clipboard_len = 0;
++
++void
++selection_clipboard_lost(void)
++{
++    if (eterm_clipboard_text) {
++        FREE(eterm_clipboard_text);
++        eterm_clipboard_text = NULL;
++    }
++    eterm_clipboard_len = 0;
++}
++
+ static char charsets[4] = {
+     'B', 'B', 'B', 'B'          /* all ascii */
+ };
+@@ -100,6 +118,890 @@ encoding_t encoding_method = LATIN1;
+ #define RESET_CHSTAT
+ #endif
+ 
++#ifdef MULTI_CHARSET
++/* Narrow compatibility bridge, NOT a full Unicode display engine.
++ * These state variables persist when a UTF-8 character is split between reads.
++ */
++static unsigned long eterm_utf8_value = 0;
++static unsigned long eterm_utf8_minimum = 0;
++static int eterm_utf8_remaining = 0;
++
++/* Return 0 for incomplete input and 1 when *codepoint is available.
++ * On an invalid continuation, replay the unexpected byte on the next step.
++ */
++static int
++eterm_utf8_next(unsigned char byte, unsigned long *codepoint, int *replay)
++{
++    *replay = 0;
++    if (eterm_utf8_remaining) {
++        if ((byte & 0xc0) != 0x80) {
++            eterm_utf8_remaining = 0;
++            *codepoint = '?';
++            *replay = 1;
++            return 1;
++        }
++        eterm_utf8_value = (eterm_utf8_value << 6) | (byte & 0x3f);
++        if (--eterm_utf8_remaining)
++            return 0;
++        *codepoint = eterm_utf8_value;
++        if (*codepoint < eterm_utf8_minimum ||
++            *codepoint > 0x10ffffUL ||
++            (*codepoint >= 0xd800 && *codepoint <= 0xdfff))
++            *codepoint = '?';
++        return 1;
++    }
++    if (byte < 0x80) {
++        *codepoint = byte;
++        return 1;
++    }
++    if (byte >= 0xc2 && byte <= 0xdf) {
++        eterm_utf8_value = byte & 0x1f;
++        eterm_utf8_minimum = 0x80;
++        eterm_utf8_remaining = 1;
++    } else if (byte >= 0xe0 && byte <= 0xef) {
++        eterm_utf8_value = byte & 0x0f;
++        eterm_utf8_minimum = 0x800;
++        eterm_utf8_remaining = 2;
++    } else if (byte >= 0xf0 && byte <= 0xf4) {
++        eterm_utf8_value = byte & 0x07;
++        eterm_utf8_minimum = 0x10000;
++        eterm_utf8_remaining = 3;
++    } else {
++        *codepoint = '?';
++        return 1;
++    }
++    return 0;
++}
++
++/* DEC Special Graphics character codes supported by Eterm's RS_acsFont.
++ * Return zero if no mapping exists. These are one-column approximations.
++ */
++static unsigned char
++eterm_utf8_acs(unsigned long cp)
++{
++    switch (cp) {
++        case 0x2500: case 0x2501: case 0x2550: return 'q'; /* horizontal */
++        case 0x2502: case 0x2503: case 0x2551: return 'x'; /* vertical */
++        case 0x250c: case 0x250f: case 0x2554: return 'l'; /* top left */
++        case 0x2510: case 0x2513: case 0x2557: return 'k'; /* top right */
++        case 0x2514: case 0x2517: case 0x255a: return 'm'; /* bottom left */
++        case 0x2518: case 0x251b: case 0x255d: return 'j'; /* bottom right */
++        case 0x251c: case 0x2523: case 0x2560: return 't'; /* left tee */
++        case 0x2524: case 0x252b: case 0x2563: return 'u'; /* right tee */
++        case 0x252c: case 0x2533: case 0x2566: return 'w'; /* top tee */
++        case 0x2534: case 0x253b: case 0x2569: return 'v'; /* bottom tee */
++        case 0x253c: case 0x254b: case 0x256c: return 'n'; /* crossing */
++        case 0x2264: return 'y'; /* less than or equal */
++        case 0x2265: return 'z'; /* greater than or equal */
++        case 0x2260: return '|'; /* not equal */
++        case 0x03c0: return '{'; /* pi */
++        case 0x00b1: return 'g'; /* plus/minus */
++        case 0x00b0: return 'f'; /* degree */
++        case 0x2022: return '~'; /* bullet */
++        default: return 0;
++    }
++}
++#endif
++
++/* Encoder shared by PRIMARY selections and plain-text screen dumps.
++ * Codepoints are validated by the UTF-8 decoder at ingestion time.
++ */
++static int
++eterm_encode_utf8(text_t cp, char *out)
++{
++    if (cp > 0x10ffff || (cp >= 0xd800 && cp <= 0xdfff))
++        cp = 0xfffd;
++    if (cp <= 0x7f) {
++        out[0] = (char) cp;
++        return 1;
++    }
++    if (cp <= 0x7ff) {
++        out[0] = (char) (0xc0 | (cp >> 6));
++        out[1] = (char) (0x80 | (cp & 63));
++        return 2;
++    }
++    if (cp <= 0xffff) {
++        out[0] = (char) (0xe0 | (cp >> 12));
++        out[1] = (char) (0x80 | ((cp >> 6) & 63));
++        out[2] = (char) (0x80 | (cp & 63));
++        return 3;
++    }
++    out[0] = (char) (0xf0 | (cp >> 18));
++    out[1] = (char) (0x80 | ((cp >> 12) & 63));
++    out[2] = (char) (0x80 | ((cp >> 6) & 63));
++    out[3] = (char) (0x80 | (cp & 63));
++    return 4;
++}
++
++/* Only used when feeding 8-bit X11 core fonts. Never write the fallback
++ * character into screen.text: we need the real scalar for later Xft work.
++ */
++/* Unicode cell widths belong to the terminal grid, not the glyph font.
++ * Currently supports simple 2-column scalars; not combining sequences or ZWJ.
++ */
++static int
++eterm_cell_width(text_t cp)
++{
++#ifdef MULTI_CHARSET
++    if (encoding_method == UTF8 && cp <= 0x10ffff)
++        return wcwidth((wchar_t) cp) == 2 ? 2 : 1;
++#endif
++    return 1;
++}
++
++/* v23: Compose a zero-column combining mark with the preceding screen
++ * scalar when Unicode provides a single NFC code point.  The existing
++ * one-code-point-per-cell layout can safely represent that result without
++ * moving the cursor or adding a new sidecar buffer.  Unsupported sequences
++ * fall through to the old path; they will be addressed by cluster storage.
++ *
++ * A base character may be the final column (Screen_WrapNext) or the first
++ * half of a two-column character.  Never compose across row boundaries.
++ */
++#ifdef MULTI_CHARSET
++static int
++eterm_compose_previous_mark(text_t mark)
++{
++    utf8proc_category_t cat;
++    utf8proc_int32_t pair[2];
++    utf8proc_ssize_t result;
++    text_t base, composed;
++    int row, col, base_width;
++
++    if (encoding_method != UTF8 || mark > 0x10ffffu)
++        return 0;
++    cat = utf8proc_category((utf8proc_int32_t) mark);
++    if (cat != UTF8PROC_CATEGORY_MN && cat != UTF8PROC_CATEGORY_MC &&
++        cat != UTF8PROC_CATEGORY_ME)
++        return 0;
++    if (utf8proc_charwidth((utf8proc_int32_t) mark) != 0)
++        return 0;
++
++    if (!(screen.flags & Screen_WrapNext) && screen.col < 1)
++        return 0;
++    row = screen.row + TermWin.saveLines;
++    if (!screen.text[row] || !screen.rend[row])
++        return 0;
++    col = (screen.flags & Screen_WrapNext) ? screen.col : screen.col - 1;
++    if (col < 0 || col >= TERM_WINDOW_GET_REPORTED_COLS())
++        return 0;
++    if (screen.text[row][col] == ETERM_WIDE_TRAIL)
++        --col;
++    if (col < 0)
++        return 0;
++    base = screen.text[row][col];
++    if (base <= ' ' || base > 0x10ffffu ||
++        (screen.rend[row][col] & RS_acsFont))
++        return 0;
++    base_width = eterm_cell_width(base);
++    if (base_width != 1 && base_width != 2)
++        return 0;
++    pair[0] = (utf8proc_int32_t) base;
++    pair[1] = (utf8proc_int32_t) mark;
++    result = utf8proc_normalize_utf32(pair, 2,
++                                     UTF8PROC_COMPOSE | UTF8PROC_STABLE);
++    if (result != 1 || pair[0] < 0 || pair[0] > 0x10ffff)
++        return 0;
++    composed = (text_t) pair[0];
++    if (composed == base || eterm_cell_width(composed) != base_width)
++        return 0;
++
++    /* A held selection must not continue referring to changed contents. */
++    if (selection.op)
++        selection_reset();
++    screen.text[row][col] = composed;
++    /* The normal dirty-cell comparison repaints the changed scalar. */
++    return 1;
++}
++#endif
++
++/* Remove the whole glyph if any occupied cell is overwritten. */
++static void
++eterm_wide_clear_at(int row, int col, rend_t style)
++{
++    int cols = TERM_WINDOW_GET_REPORTED_COLS();
++    text_t *t = screen.text[row];
++    rend_t *r = screen.rend[row];
++    if (col < 0 || col >= cols || !t || !r)
++        return;
++    if (t[col] == ETERM_WIDE_TRAIL && col > 0) {
++        t[col - 1] = ' ';
++        r[col - 1] = style;
++    } else if (eterm_cell_width(t[col]) == 2 && col + 1 < cols &&
++               t[col + 1] == ETERM_WIDE_TRAIL) {
++        t[col + 1] = ' ';
++        r[col + 1] = style;
++    }
++    t[col] = ' ';
++    r[col] = style;
++}
++
++/* Shifts, resizes and erasures can divide pairs. Never leave an orphan. */
++static void
++eterm_wide_repair_cells(text_t *t, rend_t *r, int cols, rend_t style)
++{
++    int col;
++    if (!t || !r)
++        return;
++    for (col = 0; col < cols; ++col) {
++        if (t[col] == ETERM_WIDE_TRAIL) {
++            if (col == 0 || eterm_cell_width(t[col - 1]) != 2) {
++                t[col] = ' ';
++                r[col] = style;
++            }
++        } else if (eterm_cell_width(t[col]) == 2) {
++            if (col == cols - 1 || t[col + 1] != ETERM_WIDE_TRAIL) {
++                t[col] = ' ';
++                r[col] = style;
++            } else {
++                ++col;
++            }
++        }
++    }
++}
++
++static void
++eterm_wide_repair_row(int row, rend_t style)
++{
++    eterm_wide_repair_cells(screen.text[row], screen.rend[row],
++                            TERM_WINDOW_GET_REPORTED_COLS(), style);
++}
++
++static XftDraw *eterm_xft_draw = NULL;
++
++/* Opt-in same rasterizer for ASCII and Unicode; old mode remains available. */
++static int
++eterm_xft_all_text(void)
++{
++    const char *setting = getenv("ETERM_XFT_ALL");
++    return setting && setting[0] == '1';
++}
++
++static unsigned char
++eterm_legacy_glyph(text_t cp, rend_t style)
++{
++#ifdef MULTI_CHARSET
++    if ((style & RS_acsFont) && cp > 255) {
++        unsigned char acs = eterm_utf8_acs(cp);
++        if (acs)
++            return acs;
++    }
++#endif
++    if (cp == ETERM_WIDE_TRAIL)
++        return ' ';
++    if (eterm_xft_draw && !(style & RS_acsFont) &&
++        (cp > 255 || (eterm_xft_all_text() && cp >= 32)))
++        return ' ';
++    return (cp <= 255) ? (unsigned char) cp : '?';
++}
++
++/* Optional Unicode drawing overlay. ASCII and DEC graphics still use
++ * the existing X11/core-font renderer and its background/theme machinery.
++ * The wide-character patch extends this to two-cell CJK output.
++ */
++#define ETERM_XFT_FALLBACK_CACHE 64
++
++typedef struct {
++    FcChar32 codepoint;
++    XftFont *font;
++} eterm_xft_cache_entry_t;
++
++static XftFont *eterm_xft_primary = NULL;
++static int eterm_xft_pixel_height = 0;
++static int eterm_xft_cell_height = 0;
++static int eterm_xft_cell_width = 0;
++/* Small outline glyphs need antialiasing for legible strokes.
++ * ETERM_XFT_ANTIALIAS=0 restores the v15 monochrome rendering.
++ */
++static int
++eterm_xft_antialias(void)
++{
++    const char *setting = getenv("ETERM_XFT_ANTIALIAS");
++    return !(setting && setting[0] == '0');
++}
++
++/* A single Xft face preference and pixel size applies to all scripts.
++ * Fontconfig can still supply fallback faces when glyphs are missing.
++ */
++static const char *
++eterm_xft_family(void)
++{
++    const char *setting = getenv("ETERM_XFT_FONT");
++    return setting && *setting ? setting : "monospace";
++}
++
++/* v18: persistent CJK faces, independent of per-character Fontconfig matching.
++ * Keep X11 ISO-10646 bitmap glyphs as the first choice in the draw loop.
++ * Non-CJK Unicode still uses the original Xft fallback cache.
++ *
++ * ETERM_CJK_FONT:         primary family (default Noto Sans Mono CJK JP)
++ * ETERM_CJK_FALLBACK:     alternate family (default Noto Sans Mono CJK SC)
++ * ETERM_CJK_PIXEL_SIZE:   optional shared CJK pixel size, 6..64
++ *
++ * These settings are read when the terminal opens its first CJK glyph.
++ * Fonts are reopened if the cell geometry changes. No per-glyph resizing.
++ */
++#define ETERM_CJK_FACE_COUNT 2
++static XftFont *eterm_cjk_faces[ETERM_CJK_FACE_COUNT] = { NULL, NULL };
++static int eterm_cjk_ready = 0;
++
++static void
++eterm_cjk_close_fonts(void)
++{
++    unsigned int i;
++    for (i = 0; i < ETERM_CJK_FACE_COUNT; i++) {
++        if (eterm_cjk_faces[i]) {
++            XftFontClose(Xdisplay, eterm_cjk_faces[i]);
++            eterm_cjk_faces[i] = NULL;
++        }
++    }
++    eterm_cjk_ready = 0;
++}
++
++/* Do not use the CJK face for emoji, mathematical symbols, or other scripts. */
++static int
++eterm_is_cjk(FcChar32 cp)
++{
++    return (cp >= 0x2e80 && cp <= 0x2fff) ||
++           (cp >= 0x3000 && cp <= 0x303f) ||
++           (cp >= 0x3040 && cp <= 0x30ff) ||
++           (cp >= 0x3100 && cp <= 0x312f) ||
++           (cp >= 0x3130 && cp <= 0x318f) ||
++           (cp >= 0x31a0 && cp <= 0x31ff) ||
++           (cp >= 0x3200 && cp <= 0x9fff) ||
++           (cp >= 0xac00 && cp <= 0xd7af) ||
++           (cp >= 0xf900 && cp <= 0xfaff) ||
++           (cp >= 0xff00 && cp <= 0xffef) ||
++           (cp >= 0x20000 && cp <= 0x3134f);
++}
++
++static XftFont *
++eterm_cjk_open_face(const char *family, int pixelsize)
++{
++    char pattern[384];
++    if (!family || !*family)
++        return NULL;
++    snprintf(pattern, sizeof(pattern),
++             "%s:pixelsize=%d:antialias=%s:hinting=true:hintstyle=hintslight:rgba=none",
++             family, pixelsize, eterm_xft_antialias() ? "true" : "false");
++    return XftFontOpenName(Xdisplay, Xscreen, pattern);
++}
++
++/* Choose size once for the WHOLE CJK font, not separately for every glyph.
++ * A representative ideograph provides a conservative fit test, with the
++ * original two-cell clipping rectangle remaining the final safety bound.
++ */
++static int
++eterm_cjk_sample_fits(XftFont *font)
++{
++    const FcChar32 sample = 0x4e00;  /* CJK ideograph ONE */
++    XGlyphInfo extents;
++    if (!font)
++        return 0;
++    if (!XftCharExists(Xdisplay, font, sample))
++        return 1;  /* Some alternate faces may contain kana or hangul only. */
++    XftTextExtents32(Xdisplay, font, &sample, 1, &extents);
++    return extents.width <= (unsigned int) (TermWin.fwidth * 2) &&
++           extents.height <= (unsigned int) TermWin.fheight;
++}
++
++static void
++eterm_cjk_load_fonts(void)
++{
++    const char *primary, *alternate, *override;
++    const char *families[ETERM_CJK_FACE_COUNT];
++    unsigned int i;
++    int size, minimum;
++    XftFont *face;
++    char *end;
++    long px;
++
++    if (eterm_cjk_ready)
++        return;
++    eterm_cjk_ready = 1;
++    primary = getenv("ETERM_CJK_FONT");
++    alternate = getenv("ETERM_CJK_FALLBACK");
++    families[0] = (primary && *primary) ? primary : "Noto Sans Mono CJK JP";
++    families[1] = (alternate && *alternate) ? alternate : "Noto Sans Mono CJK SC";
++
++    override = getenv("ETERM_CJK_PIXEL_SIZE");
++    px = 0;
++    if (override && *override) {
++        end = NULL;
++        px = strtol(override, &end, 10);
++        if (!end || *end || px < 6 || px > 64)
++            px = 0;
++    }
++
++    /* Match primary Xft pixel height unless the user requests a fixed size.
++     * A single size is selected for each face; never shrink an individual
++     * character or switch fonts merely because its ink bounds differ.
++     */
++    size = px ? (int) px : eterm_xft_pixel_height;
++    if (size < 6)
++        size = MAX(6, TermWin.fheight - 2);
++    minimum = px ? size : 6;
++    for (i = 0; i < ETERM_CJK_FACE_COUNT; i++) {
++        int trial;
++        face = NULL;
++        for (trial = size; trial >= minimum; trial--) {
++            face = eterm_cjk_open_face(families[i], trial);
++            if (!face)
++                continue;
++            if (px || eterm_cjk_sample_fits(face))
++                break;
++            XftFontClose(Xdisplay, face);
++            face = NULL;
++        }
++        eterm_cjk_faces[i] = face;
++    }
++}
++
++static XftFont *
++eterm_cjk_font_for(FcChar32 cp)
++{
++    unsigned int i;
++    if (!eterm_is_cjk(cp))
++        return NULL;
++    eterm_cjk_load_fonts();
++    for (i = 0; i < ETERM_CJK_FACE_COUNT; i++) {
++        if (eterm_cjk_faces[i] &&
++            XftCharExists(Xdisplay, eterm_cjk_faces[i], cp))
++            return eterm_cjk_faces[i];
++    }
++    return NULL;
++}
++
++static unsigned int eterm_xft_replace = 0;
++static eterm_xft_cache_entry_t eterm_xft_cache[ETERM_XFT_FALLBACK_CACHE];
++
++static void
++eterm_xft_close_fonts(void)
++{
++    unsigned int i;
++    for (i = 0; i < ETERM_XFT_FALLBACK_CACHE; i++) {
++        if (eterm_xft_cache[i].font) {
++            XftFontClose(Xdisplay, eterm_xft_cache[i].font);
++            eterm_xft_cache[i].font = NULL;
++        }
++        eterm_xft_cache[i].codepoint = 0;
++    }
++    eterm_xft_replace = 0;
++    eterm_cjk_close_fonts();
++    if (eterm_xft_primary) {
++        XftFontClose(Xdisplay, eterm_xft_primary);
++        eterm_xft_primary = NULL;
++    }
++}
++
++/* Used only to choose a primary font size matching Eterm's grid.
++ * Individual Unicode glyphs are NOT shrunk independently.
++ */
++static int
++eterm_xft_glyph_fits(XftFont *font, FcChar32 cp)
++{
++    XGlyphInfo ink;
++    if (!font || !XftCharExists(Xdisplay, font, cp))
++        return 0;
++    XftTextExtents32(Xdisplay, font, &cp, 1, &ink);
++    return ink.width <= TermWin.fwidth * eterm_cell_width(cp) &&
++           ink.height <= TermWin.fheight;
++}
++
++static void
++eterm_xft_begin(Drawable drawable)
++{
++    char name[256];
++    int size, nominal_height;
++    XftFont *candidate;
++
++    if (eterm_xft_draw) {
++        XftDrawDestroy(eterm_xft_draw);
++        eterm_xft_draw = NULL;
++    }
++    /* Font size must be recomputed when either grid dimension changes. */
++    if (eterm_xft_cell_height != TermWin.fheight ||
++        eterm_xft_cell_width != TermWin.fwidth) {
++        eterm_xft_close_fonts();
++        eterm_xft_cell_height = TermWin.fheight;
++        eterm_xft_cell_width = TermWin.fwidth;
++    }
++    if (!eterm_xft_primary) {
++        nominal_height = MAX(6, TermWin.fheight - 2);
++        for (size = nominal_height; size >= 6; --size) {
++            snprintf(name, sizeof(name),
++                     "%s:pixelsize=%d:antialias=%s:hinting=true:hintstyle=hintfull:rgba=none",
++                     eterm_xft_family(), size,
++                     eterm_xft_antialias() ? "true" : "false");
++            candidate = XftFontOpenName(Xdisplay, Xscreen, name);
++            if (!candidate)
++                continue;
++            if (eterm_xft_primary)
++                XftFontClose(Xdisplay, eterm_xft_primary);
++            eterm_xft_primary = candidate;
++            eterm_xft_pixel_height = size;
++            /* A glyph with typical monospace advance fits the grid. */
++            if (eterm_xft_glyph_fits(candidate, (FcChar32) 'M'))
++                break;
++        }
++    }
++    if (eterm_xft_primary)
++        eterm_xft_draw = XftDrawCreate(Xdisplay, drawable, Xvisual, cmap);
++}
++
++static void
++eterm_xft_end(void)
++{
++    if (eterm_xft_draw) {
++        XftDrawDestroy(eterm_xft_draw);
++        eterm_xft_draw = NULL;
++    }
++}
++
++static XftFont *
++eterm_xft_find_font(FcChar32 cp)
++{
++    unsigned int i;
++    FcPattern *pattern, *match;
++    FcCharSet *charset;
++    FcResult result;
++    XftFont *font;
++
++    if (!eterm_xft_primary)
++        return NULL;
++    /* Prefer one persistent CJK fontset face to the per-glyph matcher.
++     * The bitmap-first path has already been tried by the caller.
++     */
++    font = eterm_cjk_font_for(cp);
++    if (font)
++        return font;
++    /* If the main face contains the glyph, always use it: no per-character
++     * size changes, even when a glyph protrudes slightly beyond its cell.
++     */
++    if (XftCharExists(Xdisplay, eterm_xft_primary, cp))
++        return eterm_xft_primary;
++    for (i = 0; i < ETERM_XFT_FALLBACK_CACHE; i++) {
++        if (eterm_xft_cache[i].font && eterm_xft_cache[i].codepoint == cp)
++            return eterm_xft_cache[i].font;
++    }
++
++    /* Match missing glyphs at the SAME pixel size, hinting, and antialias
++     * settings as the primary font. Never shrink a glyph independently.
++     * Wide characters have two cells of horizontal drawing space already.
++     */
++    pattern = FcPatternCreate();
++    charset = FcCharSetCreate();
++    if (!pattern || !charset) {
++        if (pattern)
++            FcPatternDestroy(pattern);
++        if (charset)
++            FcCharSetDestroy(charset);
++        return eterm_xft_primary;
++    }
++    FcCharSetAddChar(charset, cp);
++    FcPatternAddString(pattern, FC_FAMILY, (const FcChar8 *) eterm_xft_family());
++    FcPatternAddDouble(pattern, FC_PIXEL_SIZE, (double) eterm_xft_pixel_height);
++    FcPatternAddCharSet(pattern, FC_CHARSET, charset);
++    FcPatternAddBool(pattern, FC_ANTIALIAS, eterm_xft_antialias() ? FcTrue : FcFalse);
++    FcPatternAddBool(pattern, FC_HINTING, FcTrue);
++    FcPatternAddInteger(pattern, FC_HINT_STYLE, FC_HINT_FULL);
++    FcPatternAddInteger(pattern, FC_RGBA, FC_RGBA_NONE);
++    FcCharSetDestroy(charset);
++    FcConfigSubstitute(NULL, pattern, FcMatchPattern);
++    XftDefaultSubstitute(Xdisplay, Xscreen, pattern);
++    match = XftFontMatch(Xdisplay, Xscreen, pattern, &result);
++    FcPatternDestroy(pattern);
++    if (!match)
++        return eterm_xft_primary;
++    font = XftFontOpenPattern(Xdisplay, match);
++    if (!font)
++        return eterm_xft_primary;
++    if (!XftCharExists(Xdisplay, font, cp)) {
++        XftFontClose(Xdisplay, font);
++        return eterm_xft_primary;
++    }
++    i = eterm_xft_replace++ % ETERM_XFT_FALLBACK_CACHE;
++    if (eterm_xft_cache[i].font)
++        XftFontClose(Xdisplay, eterm_xft_cache[i].font);
++    eterm_xft_cache[i].font = font;
++    eterm_xft_cache[i].codepoint = cp;
++    return font;
++}
++
++/* Center the actual ink horizontally, with the baseline of Eterm's
++ * core-font renderer. Clamp vertically to keep ascenders/descenders in
++ * the grid even when fallback fonts have different metrics.
++ */
++static void
++eterm_xft_position_glyph(int row, int col, int span, const XGlyphInfo *ink,
++                         int *x, int *y)
++{
++    int top = Row2Pixel(row);
++    int baseline, lowest, highest;
++
++#ifdef MULTI_CHARSET
++    baseline = top + MAX((encoding_method == LATIN1 ? 0 : TermWin.mfont->ascent),
++                         TermWin.font->ascent);
++#else
++    baseline = top + TermWin.font->ascent;
++#endif
++    *x = Col2Pixel(col) + (TermWin.fwidth * span - (int) ink->width) / 2 - ink->x;
++    lowest = top + ink->y;
++    highest = top + TermWin.fheight - (int) ink->height + ink->y;
++    if (lowest <= highest) {
++        if (baseline < lowest)
++            baseline = lowest;
++        if (baseline > highest)
++            baseline = highest;
++    } else {
++        /* Oversize last-resort font: center the ink within the clip. */
++        baseline = top + (TermWin.fheight - (int) ink->height) / 2 + ink->y;
++    }
++    *y = baseline;
++}
++
++/* Bitmap-first Unicode path, inspired by xterm and urxvt fontset design.
++ * X11 ISO-10646 core fonts contain exact bitmap glyphs, without Xft
++ * rasterisation. Only accept a glyph if its ink fits one or two cells.
++ * Xft remains the fallback if the font is missing the glyph.
++ *
++ * Set ETERM_BITMAP_FONTS to a comma-separated preference list of XLFD
++ * names visible to xlsfonts. These are used before the built-in defaults.
++ */
++#define ETERM_BITMAP_MAX_FONTS 12
++static XFontStruct *eterm_bitmap_fonts[ETERM_BITMAP_MAX_FONTS];
++static unsigned int eterm_bitmap_font_count = 0;
++static int eterm_bitmap_loaded = 0;
++static GC eterm_bitmap_gc = 0;
++
++static void
++eterm_bitmap_try_font(const char *name)
++{
++    XFontStruct *font;
++    unsigned int i;
++    if (!name || !*name || eterm_bitmap_font_count >= ETERM_BITMAP_MAX_FONTS)
++        return;
++    font = XLoadQueryFont(Xdisplay, name);
++    if (!font)
++        return;
++    for (i = 0; i < eterm_bitmap_font_count; i++) {
++        if (eterm_bitmap_fonts[i]->fid == font->fid) {
++            XFreeFont(Xdisplay, font);
++            return;
++        }
++    }
++    eterm_bitmap_fonts[eterm_bitmap_font_count++] = font;
++}
++
++static void
++eterm_bitmap_load_fonts(void)
++{
++    /* Use explicit bitmap fonts first, then bitmap fixed-font fallbacks.
++     * This is font selection, not font scaling: never resize a PCF glyph.
++     */
++    static const char *fallback[] = {
++        "-misc-fixed-medium-r-semicondensed--13-120-75-75-c-60-iso10646-1",
++        "-misc-fixed-medium-r-normal--13-120-75-75-c-70-iso10646-1",
++        "-misc-fixed-medium-r-normal--14-130-75-75-c-70-iso10646-1",
++        "-misc-fixed-medium-r-normal--15-140-75-75-c-90-iso10646-1",
++        "-xos4-terminus-medium-r-normal--14-140-72-72-c-80-iso10646-1"
++    };
++    char names[2048], *token;
++    const char *env;
++    unsigned int i;
++    if (eterm_bitmap_loaded)
++        return;
++    eterm_bitmap_loaded = 1;
++    env = getenv("ETERM_BITMAP_FONTS");
++    if (env && *env) {
++        strncpy(names, env, sizeof(names) - 1);
++        names[sizeof(names) - 1] = 0;
++        for (token = strtok(names, ","); token;
++             token = strtok(NULL, ",")) {
++            while (*token == ' ' || *token == '\t')
++                token++;
++            eterm_bitmap_try_font(token);
++        }
++    }
++    for (i = 0; i < sizeof(fallback) / sizeof(fallback[0]); i++)
++        eterm_bitmap_try_font(fallback[i]);
++}
++
++static int
++eterm_bitmap_glyph_metrics(XFontStruct *font, FcChar32 cp,
++                           XChar2b *ch, XCharStruct *ink)
++{
++    unsigned int high, low;
++    int ncols, index, dir, ascent, descent;
++    XCharStruct *stored;
++    if (!font || cp < 256 || cp > 0xffff ||
++        (cp >= 0xd800 && cp <= 0xdfff))
++        return 0;
++    high = (unsigned int) (cp >> 8);
++    low = (unsigned int) (cp & 255);
++    if (high < font->min_byte1 || high > font->max_byte1 ||
++        low < font->min_char_or_byte2 || low > font->max_char_or_byte2)
++        return 0;
++    /* X11 may otherwise render default_char as a replacement, giving the
++     * false impression that a font provides a particular Unicode glyph.
++     */
++    if (font->per_char) {
++        ncols = font->max_char_or_byte2 - font->min_char_or_byte2 + 1;
++        index = (high - font->min_byte1) * ncols +
++                low - font->min_char_or_byte2;
++        stored = &font->per_char[index];
++        if (!stored->lbearing && !stored->rbearing && !stored->width &&
++            !stored->ascent && !stored->descent && !stored->attributes)
++            return 0;
++    } else if (!font->all_chars_exist) {
++        return 0;
++    }
++    ch->byte1 = (unsigned char) high;
++    ch->byte2 = (unsigned char) low;
++    XTextExtents16(font, ch, 1, &dir, &ascent, &descent, ink);
++    return 1;
++}
++
++static int
++eterm_bitmap_draw(Drawable target, FcChar32 cp, int row, int col,
++                  int span, unsigned long fg, const XRectangle *clip)
++{
++    unsigned int i;
++    XFontStruct *font;
++    XChar2b ch;
++    XCharStruct ink;
++    int width, height, x, y;
++
++    if (cp <= 255 || cp > 0xffff)
++        return 0;
++    eterm_bitmap_load_fonts();
++    for (i = 0; i < eterm_bitmap_font_count; i++) {
++        font = eterm_bitmap_fonts[i];
++        if (font->ascent + font->descent > TermWin.fheight ||
++            !eterm_bitmap_glyph_metrics(font, cp, &ch, &ink))
++            continue;
++        width = ink.rbearing - ink.lbearing;
++        height = ink.ascent + ink.descent;
++        if (width < 1 || width > TermWin.fwidth * span ||
++            height < 1 || height > TermWin.fheight)
++            continue;
++        if (!eterm_bitmap_gc)
++            eterm_bitmap_gc = XCreateGC(Xdisplay, target, 0, NULL);
++        if (!eterm_bitmap_gc)
++            return 0;
++        XSetForeground(Xdisplay, eterm_bitmap_gc, fg);
++        XSetFont(Xdisplay, eterm_bitmap_gc, font->fid);
++        XSetClipRectangles(Xdisplay, eterm_bitmap_gc, 0, 0,
++                           (XRectangle *) clip, 1, Unsorted);
++        x = Col2Pixel(col) + (TermWin.fwidth * span - width) / 2 - ink.lbearing;
++        y = Row2Pixel(row) + (TermWin.fheight - height) / 2 + ink.ascent;
++        XDrawString16(Xdisplay, target, eterm_bitmap_gc, x, y, &ch, 1);
++        return 1;
++    }
++    return 0;
++}
++
++/* v19: One glyph-paint decision for both Unicode rendering backends.
++ * The legacy renderer owns cell-background repair (including image and
++ * transparent backgrounds). This function draws glyph ink only and never
++ * changes the cell background or redraws unchanged cells.
++ */
++static void
++eterm_unicode_draw_cell(Drawable target, int row, int col,
++                        FcChar32 cp, rend_t attrs)
++{
++    int fg, bg, style, swap_tmp, x, y, span, ncols;
++    XColor xcolor;
++    XftColor color;
++    XRectangle clip;
++    XftFont *font;
++    XGlyphInfo ink;
++    FcChar32 glyph;
++
++    ncols = TERM_WINDOW_GET_COLS();
++    span = eterm_cell_width(cp);
++    if (span != 1 && span != 2)
++        return;
++    if (span == 2 && col + 1 >= ncols)
++        return;                 /* Never paint beyond the last grid cell. */
++
++    fg = GET_FGCOLOR(attrs);
++    bg = GET_BGCOLOR(attrs);
++    style = GET_ATTR(attrs);
++    if (style & RS_RVid)
++        SWAP_IT(fg, bg, swap_tmp);
++    if (style & RS_Select)
++        SWAP_IT(fg, bg, swap_tmp);
++    if ((style & RS_Cursor) && TermWin.focus)
++        SWAP_IT(fg, bg, swap_tmp);
++#ifndef NO_BOLDUNDERLINE
++    if ((style & RS_Bold) && fg == fgColor && bg != colorBD)
++        fg = colorBD;
++    else if ((style & RS_Uline) && fg == fgColor && bg != colorUL)
++        fg = colorUL;
++#endif
++
++    clip.x = (short) Col2Pixel(col);
++    clip.y = (short) Row2Pixel(row);
++    clip.width = (unsigned short) (TermWin.fwidth * span);
++    clip.height = (unsigned short) TermWin.fheight;
++
++    xcolor.pixel = PixColors[fg];
++    XQueryColor(Xdisplay, cmap, &xcolor);
++    /* Bitmap and Xft use the same foreground color and clipping area. */
++    if (eterm_bitmap_draw(target, cp, row, col, span, xcolor.pixel, &clip))
++        return;
++
++    if (!eterm_xft_draw)
++        return;
++    font = eterm_xft_find_font(cp);
++    if (!font)
++        return;
++    color.pixel = xcolor.pixel;
++    color.color.red = xcolor.red;
++    color.color.green = xcolor.green;
++    color.color.blue = xcolor.blue;
++    color.color.alpha = 0xffff;
++    glyph = cp;
++    if (!XftCharExists(Xdisplay, font, glyph))
++        glyph = (FcChar32) '?';
++    XftTextExtents32(Xdisplay, font, &glyph, 1, &ink);
++    eterm_xft_position_glyph(row, col, span, &ink, &x, &y);
++    XftDrawSetClipRectangles(eterm_xft_draw, 0, 0, &clip, 1);
++    XftDrawString32(eterm_xft_draw, &color, font, x, y, &glyph, 1);
++}
++
++/* Phase two of the normal Eterm refresh: paint only glyphs whose cells
++ * were repainted in phase one. Waiting until the end of each row avoids
++ * later core-font runs overwriting earlier Unicode glyphs in that row.
++ */
++static void
++eterm_xft_unicode_overlay(int row, int row_offset,
++                         const unsigned char *dirty, Drawable target)
++{
++    int col, cols, span;
++    text_t cp;
++    rend_t attrs;
++
++    /* Keep v18 behavior if Xft cannot initialize; the core-font path
++     * retains its normal '?' fallback instead of blending bitmap ink over it.
++     */
++    if (!eterm_xft_draw)
++        return;
++    cols = TERM_WINDOW_GET_COLS();
++    for (col = 0; col < cols; ++col) {
++        cp = screen.text[row + row_offset][col];
++        span = eterm_cell_width(cp);
++        if (!dirty[col] && !(span == 2 && col + 1 < cols && dirty[col + 1]))
++            continue;
++        attrs = drawn_rend[row][col];
++        if (cp == ETERM_WIDE_TRAIL || (attrs & RS_acsFont) ||
++            cp < 33 || (cp <= 255 && !eterm_xft_all_text()))
++            continue;
++        eterm_unicode_draw_cell(target, row, col, (FcChar32) cp, attrs);
++    }
++}
++
+ /* Fill part/all of a drawn line with blanks. */
+ inline void blank_line(text_t *, rend_t *, int, rend_t);
+ inline void
+@@ -109,9 +1011,10 @@ blank_line(text_t *et, rend_t *er, int width, rend_t efs)
+     register unsigned int i = width;
+     rend_t *r = er, fs = efs;
+ 
+-    MEMSET(et, ' ', i);
+-    for (; i--;)
++    while (i--) {
++        *et++ = ' ';
+         *r++ = fs;
++    }
+ }
+ 
+ /* Create a new row in the screen buffer and initialize it. */
+@@ -126,10 +1029,11 @@ blank_screen_mem(text_t **tp, rend_t **rp, int row, rend_t efs)
+         tp[row] = MALLOC(sizeof(text_t) * (TERM_WINDOW_GET_REPORTED_COLS() + 1));
+         rp[row] = MALLOC(sizeof(rend_t) * TERM_WINDOW_GET_REPORTED_COLS());
+     }
+-    MEMSET(tp[row], ' ', i);
+     tp[row][i] = 0;
+-    for (r = rp[row]; i--;)
++    for (r = rp[row]; i--;) {
++        tp[row][i] = ' ';
+         *r++ = fs;
++    }
+ }
+ 
+ void
+@@ -283,6 +1187,9 @@ scr_reset(void)
+                                    TERM_WINDOW_GET_REPORTED_COLS() - prev_ncol, DEFAULT_RSTYLE);
+                 }
+             }
++            for (i = 0; i < total_rows; ++i)
++                if (screen.text[i])
++                    eterm_wide_repair_row(i, DEFAULT_RSTYLE);
+             for (i = 0; i < TERM_WINDOW_GET_REPORTED_ROWS(); i++) {
+                 drawn_text[i] = REALLOC(drawn_text[i], (TERM_WINDOW_GET_REPORTED_COLS() + 1) * sizeof(text_t));
+                 drawn_rend[i] = REALLOC(drawn_rend[i], TERM_WINDOW_GET_REPORTED_COLS() * sizeof(rend_t));
+@@ -294,6 +1201,8 @@ scr_reset(void)
+                     if (TERM_WINDOW_GET_REPORTED_COLS() > prev_ncol)
+                         blank_line(&(swap.text[i][prev_ncol]), &(swap.rend[i][prev_ncol]),
+                                    TERM_WINDOW_GET_REPORTED_COLS() - prev_ncol, DEFAULT_RSTYLE);
++                    eterm_wide_repair_cells(swap.text[i], swap.rend[i],
++                                            TERM_WINDOW_GET_REPORTED_COLS(), DEFAULT_RSTYLE);
+                 }
+                 if (TERM_WINDOW_GET_REPORTED_COLS() > prev_ncol)
+                     blank_line(&(drawn_text[i][prev_ncol]), &(drawn_rend[i][prev_ncol]),
+@@ -743,16 +1652,43 @@ scr_add_lines(const unsigned char *str, int nlines, int len)
+ #endif
+ 
+     for (i = 0; i < len;) {
++        int eterm_width = 1;
++        int eterm_acs_cell = 0;
++        text_t eterm_scalar = 0;
+         c = str[i++];
+ #ifdef MULTI_CHARSET
+-        if ((encoding_method != LATIN1) && (chstat == WBYTE)) {
++        if (encoding_method == UTF8) {
++            unsigned long codepoint = 0;
++            unsigned char acs;
++            int replay = 0;
++            if (!eterm_utf8_next((unsigned char) c, &codepoint, &replay))
++                continue;
++            if (replay)
++                --i;
++            eterm_scalar = (text_t) codepoint;
++            /* Composable mark: update the prior cell without consuming a
++             * terminal column, even when UTF-8 bytes arrived in two reads. */
++            if (eterm_compose_previous_mark(eterm_scalar))
++                continue;
++            eterm_width = eterm_cell_width(eterm_scalar);
++            acs = eterm_utf8_acs(codepoint);
++            if (acs) {
++                c = (char) acs;
++                eterm_acs_cell = 1;
++            } else if (codepoint <= 255) {
++                c = (char) codepoint;
++            } else {
++                c = '?';
++            }
++        }
++        if ((encoding_method != LATIN1) && (encoding_method != UTF8) && (chstat == WBYTE)) {
+             rstyle |= RS_multiMask;     /* multibyte 2nd byte */
+             chstat = SBYTE;
+             if (encoding_method == EUCJ) {
+                 c |= 0x80;      /* maybe overkill, but makes it selectable */
+             }
+         } else if (chstat == SBYTE) {
+-            if ((encoding_method != LATIN1) && (multi_byte || (c & 0x80))) {    /* multibyte 1st byte */
++            if ((encoding_method != LATIN1) && (encoding_method != UTF8) && (multi_byte || (c & 0x80))) {    /* multibyte 1st byte */
+                 rstyle &= ~RS_multiMask;
+                 rstyle |= RS_multi1;
+                 chstat = WBYTE;
+@@ -795,6 +1731,21 @@ scr_add_lines(const unsigned char *str, int nlines, int len)
+ #ifdef MULTI_CHARSET
+         }
+ #endif
++        /* Do not split a wide character at the right margin. */
++        if (eterm_width == 2 && (last_col < 2 ||
++                                 (screen.col == last_col - 1 &&
++                                  !(screen.flags & Screen_Autowrap)))) {
++            eterm_scalar = '?';
++            eterm_width = 1;
++            eterm_acs_cell = 0;
++            c = '?';
++        }
++        if (eterm_width == 2 && screen.col == last_col - 1 &&
++            !(screen.flags & Screen_WrapNext)) {
++            eterm_wide_clear_at(row, screen.col, rstyle);
++            stp[last_col] = WRAP_CHAR;
++            screen.flags |= Screen_WrapNext;
++        }
+         if (screen.flags & Screen_WrapNext) {
+             stp[last_col] = WRAP_CHAR;
+             if (screen.row == screen.bscroll) {
+@@ -813,12 +1764,32 @@ scr_add_lines(const unsigned char *str, int nlines, int len)
+             screen.flags &= ~Screen_WrapNext;
+         }
+         if (screen.flags & Screen_Insert)
+-            scr_insdel_chars(1, INSERT);
+-        stp[screen.col] = c;
++            scr_insdel_chars(eterm_width, INSERT);
++        eterm_wide_clear_at(row, screen.col, rstyle);
++        if (eterm_width == 2)
++            eterm_wide_clear_at(row, screen.col + 1, rstyle);
++#ifdef MULTI_CHARSET
++        stp[screen.col] = (encoding_method == UTF8) ? eterm_scalar : (unsigned char) c;
++#else
++        stp[screen.col] = (unsigned char) c;
++#endif
++        /* Only this cell selects the DEC line-drawing font; do not mutate
++         * global rstyle, which determines how later characters are drawn. */
++#ifdef MULTI_CHARSET
++        srp[screen.col] = eterm_acs_cell
++            ? ((rstyle & ~(RS_fontMask | RS_multiMask)) | RS_acsFont)
++            : rstyle;
++#else
+         srp[screen.col] = rstyle;
+-        if (screen.col < (last_col - 1))
+-            screen.col++;
++#endif
++        if (eterm_width == 2) {
++            stp[screen.col + 1] = ETERM_WIDE_TRAIL;
++            srp[screen.col + 1] = srp[screen.col];
++        }
++        if (screen.col + eterm_width < last_col)
++            screen.col += eterm_width;
+         else {
++            screen.col = last_col - 1;
+             stp[last_col] = last_col;
+             if (screen.flags & Screen_Autowrap)
+                 screen.flags |= Screen_WrapNext;
+@@ -863,8 +1834,13 @@ scr_backspace(void)
+         screen.row--;
+     } else if (screen.flags & Screen_WrapNext) {
+         screen.flags &= ~Screen_WrapNext;
+-    } else
++    } else {
+         scr_gotorc(0, -1, RELATIVE);
++        if (screen.text[screen.row + TermWin.saveLines] &&
++            screen.text[screen.row + TermWin.saveLines][screen.col] == ETERM_WIDE_TRAIL &&
++            screen.col > 0)
++            screen.col--;
++    }
+ }
+ 
+ /*
+@@ -1021,6 +1997,7 @@ scr_erase_line(int mode)
+                 return;
+         }
+         blank_line(&(screen.text[row][col]), &(screen.rend[row][col]), num, rstyle & ~(RS_Uline | RS_Overscore));
++        eterm_wide_repair_row(row, rstyle & ~(RS_Uline | RS_Overscore));
+     } else {
+         blank_screen_mem(screen.text, screen.rend, row, rstyle & ~(RS_Uline | RS_Overscore));
+     }
+@@ -1215,6 +2192,7 @@ scr_insdel_chars(int count, int insdel)
+         screen.text[row][TERM_WINDOW_GET_REPORTED_COLS() - 1] = ' ';
+     }
+ #endif
++    eterm_wide_repair_row(row, rstyle);
+ }
+ 
+ /*
+@@ -1461,7 +2439,10 @@ set_multichar_encoding(const char *str)
+ {
+ #ifdef MULTI_CHARSET
+     if (str && *str) {
+-        if (!strcasecmp(str, "utf8") || !strcasecmp(str, "ucs2")) {
++        if (!strcasecmp(str, "utf8") || !strcasecmp(str, "utf-8") || !strcasecmp(str, "iso-10646")) {
++            encoding_method = UTF8;
++            multichar_decode = latin1;
++        } else if (!strcasecmp(str, "ucs2")) {
+             encoding_method = UCS2;
+             multichar_decode = latin1;
+         } else if (!strcasecmp(str, "sjis")) {
+@@ -1510,7 +2491,8 @@ scr_expose(int x, int y, int width, int height)
+               rect_end.col, rect_end.row));
+ 
+     for (i = rect_beg.row; i <= rect_end.row; i++) {
+-        MEMSET(&(drawn_text[i][rect_beg.col]), 0, rect_end.col - rect_beg.col + 1);
++        MEMSET(&(drawn_text[i][rect_beg.col]), 0,
++               (rect_end.col - rect_beg.col + 1) * sizeof(text_t));
+     }
+ }
+ 
+@@ -1626,6 +2608,45 @@ scr_multi2(void)
+ }
+ #endif /* MULTI_CHARSET */
+ 
++/* v22: Present an already-composited region of the backing pixmap.
++ * XClearArea() instead repaints the *window background*, potentially showing
++ * a cleared/old frame during rapid updates. Copying the completed region
++ * directly keeps the old contents visible until the new pixels arrive.
++ *
++ * This helper is only used while buffer_pixmap exists. It does not modify
++ * the image background or paint text, so the bitmap and Xft backends remain
++ * unchanged. Clip before issuing the X11 request (negative widths are not
++ * allowed by XCopyArea).
++ */
++static void
++eterm_present_pixmap_region(int x, int y, int width, int height)
++{
++    int maxwidth, maxheight;
++
++    if (!buffer_pixmap || width <= 0 || height <= 0)
++        return;
++    maxwidth = TermWin_TotalWidth();
++    maxheight = TermWin_TotalHeight();
++    if (x < 0) {
++        width += x;
++        x = 0;
++    }
++    if (y < 0) {
++        height += y;
++        y = 0;
++    }
++    if (width <= 0 || height <= 0 || x >= maxwidth || y >= maxheight)
++        return;
++    if (width > maxwidth - x)
++        width = maxwidth - x;
++    if (height > maxheight - y)
++        height = maxheight - y;
++    if (width <= 0 || height <= 0)
++        return;
++    XCopyArea(Xdisplay, buffer_pixmap, TermWin.vt, TermWin.gc,
++              x, y, (unsigned int) width, (unsigned int) height, x, y);
++}
++
+ /*
+  * Refresh the screen
+  * drawn_text/drawn_rend contain the screen information before the update.
+@@ -1673,6 +2694,9 @@ scr_refresh(int type)
+     register int ncols = TERM_WINDOW_GET_COLS();
+ #endif
+     int ascent, descent;
++    unsigned char eterm_xft_dirty[MAX_COLS + 1];
++    int eterm_dirty_col;
++    int eterm_run_first_col;
+ 
+     PROF_INIT(scr_refresh);
+ 
+@@ -1697,6 +2721,7 @@ scr_refresh(int type)
+     }
+ 
+     row_offset = TermWin.saveLines - TermWin.view_start;
++    eterm_xft_begin(draw_buffer);
+     fprop = TermWin.fprop;
+ 
+     gcvalue.foreground = PixColors[fgColor];
+@@ -1751,8 +2776,18 @@ scr_refresh(int type)
+         srp = screen.rend[scrrow];
+         dtp = drawn_text[row];
+         drp = drawn_rend[row];
++        MEMSET(eterm_xft_dirty, 0, sizeof(eterm_xft_dirty));
+ 
+         for (col = 0; col < ncols; col++) {
++            if (col + 1 < ncols &&
++                (eterm_cell_width(stp[col]) == 2 ||
++                 eterm_cell_width(dtp[col]) == 2)) {
++                if (stp[col] != dtp[col] || stp[col + 1] != dtp[col + 1] ||
++                    srp[col] != drp[col] || srp[col + 1] != drp[col + 1]) {
++                    dtp[col] = 0;
++                    dtp[col + 1] = 0;
++                }
++            }
+             if (!refresh_all) {
+                 /* compare new text with old - if exactly the same then continue */
+                 rt1 = srp[col];
+@@ -1778,11 +2813,12 @@ scr_refresh(int type)
+             lasttext = dtp[col];
+             lastrend = drp[col];
+             /* redraw one or more characters */
++            eterm_run_first_col = col;
+             dtp[col] = stp[col];
+             rend = drp[col] = srp[col];
+ 
+             len = 0;
+-            buffer[len++] = stp[col];
++            buffer[len++] = eterm_legacy_glyph(stp[col], srp[col]);
+             xpixel = Col2Pixel(col);
+             wlen = 1;
+ 
+@@ -1809,7 +2845,7 @@ scr_refresh(int type)
+                         /* XXX: could check sanity on 2nd byte */
+                         dtp[col] = stp[col];
+                         drp[col] = srp[col];
+-                        buffer[len++] = stp[col];
++                        buffer[len++] = eterm_legacy_glyph(stp[col], srp[col]);
+                         col++;
+                         if ((col == ncols) || (srp[col] != (unsigned int) rend))
+                             break;
+@@ -1821,7 +2857,7 @@ scr_refresh(int type)
+                             break;
+                         dtp[col] = stp[col];
+                         drp[col] = srp[col];
+-                        buffer[len++] = stp[col];
++                        buffer[len++] = eterm_legacy_glyph(stp[col], srp[col]);
+                     }
+                     col--;
+                     if (buffer[0] & 0x80)
+@@ -1860,7 +2896,7 @@ scr_refresh(int type)
+                         lastrend = drp[col];
+                         dtp[col] = stp[col];
+                         drp[col] = srp[col];
+-                        buffer[len++] = stp[col];
++                        buffer[len++] = eterm_legacy_glyph(stp[col], srp[col]);
+                     }
+                     col--;
+                     wlen = len;
+@@ -2157,6 +3193,10 @@ scr_refresh(int type)
+                 UPDATE_BOX(xpixel, ypixel - ascent, Width2Pixel(1 + wbyte) - 1, Height2Pixel(1) - 1);
+                 XSetForeground(Xdisplay, TermWin.gc, PixColors[fgColor]);
+             }
++            /* Dirty cells are column positions, never byte counts. */
++            for (eterm_dirty_col = eterm_run_first_col; eterm_dirty_col <= col; ++eterm_dirty_col)
++                if (eterm_dirty_col >= 0 && eterm_dirty_col < ncols)
++                    eterm_xft_dirty[eterm_dirty_col] = 1;
+             if (gcmask) {       /* restore normal colors */
+                 gcvalue.foreground = PixColors[fgColor];
+                 gcvalue.background = PixColors[bgColor];
+@@ -2170,8 +3210,21 @@ scr_refresh(int type)
+                 }
+             }
+         }                       /* for (col = 0; col < TERM_WINDOW_GET_REPORTED_COLS(); col++) */
++        eterm_xft_unicode_overlay(row, row_offset, eterm_xft_dirty, draw_buffer);
++        /* A two-cell Xft glyph may extend beyond the legacy run's paint box. */
++        if (buffer_pixmap) {
++            for (eterm_dirty_col = 0; eterm_dirty_col + 1 < ncols; ++eterm_dirty_col) {
++                if (eterm_cell_width(stp[eterm_dirty_col]) == 2 &&
++                    (eterm_xft_dirty[eterm_dirty_col] || eterm_xft_dirty[eterm_dirty_col + 1])) {
++                    UPDATE_BOX(Col2Pixel(eterm_dirty_col), Row2Pixel(row),
++                               Col2Pixel(eterm_dirty_col + 2), Row2Pixel(row + 1));
++                }
++            }
++        }
+     }                           /* for (row = 0; row < TERM_WINDOW_GET_REPORTED_ROWS(); row++) */
+ 
++    eterm_xft_end();
++
+     row = screen.row + TermWin.saveLines;
+     col = screen.col;
+     if (screen.flags & Screen_VisibleCursor) {
+@@ -2185,28 +3238,32 @@ scr_refresh(int type)
+ #endif
+     }
+     if (buffer_pixmap) {
+-        D_SCREEN(("Update box dimensions:  from (%d, %d) to (%d, %d).  Dimensions %dx%d\n", low_x, low_y, high_x, high_y,
+-                  high_x - low_x + 1, high_y - low_y + 1));
+-        XClearArea(Xdisplay, TermWin.vt, low_x, low_y, high_x - low_x + 1, high_y - low_y + 1, False);
++        /* Present only the complete damaged image. The v19 no-op guard is
++         * retained; the helper also clips the damage to the window. */
++        if (low_x <= high_x && low_y <= high_y) {
++            eterm_present_pixmap_region(low_x, low_y,
++                                        high_x - low_x + 1,
++                                        high_y - low_y + 1);
++        }
+         if (fshadow.shadow[SHADOW_TOP_LEFT] || fshadow.shadow[SHADOW_LEFT] || fshadow.shadow[SHADOW_BOTTOM_LEFT]) {
+             XCopyArea(Xdisplay, pmap, buffer_pixmap, TermWin.gc, TermWin.internalBorder - 1, 0, 1, TermWin_TotalHeight() - 1,
+                       TermWin.internalBorder - 1, 0);
+-            XClearArea(Xdisplay, TermWin.vt, TermWin.internalBorder - 1, 0, 1, TermWin_TotalHeight() - 1, False);
++            eterm_present_pixmap_region(TermWin.internalBorder - 1, 0, 1, TermWin_TotalHeight() - 1);
+         }
+         if (fshadow.shadow[SHADOW_TOP_RIGHT] || fshadow.shadow[SHADOW_RIGHT] || fshadow.shadow[SHADOW_BOTTOM_RIGHT] || boldlast) {
+             XCopyArea(Xdisplay, pmap, buffer_pixmap, TermWin.gc, TermWin_TotalWidth() - 2, 0, 1, TermWin_TotalHeight() - 1,
+                       TermWin_TotalWidth() - 2, 0);
+-            XClearArea(Xdisplay, TermWin.vt, TermWin_TotalWidth() - 2, 0, 1, TermWin_TotalHeight() - 1, False);
++            eterm_present_pixmap_region(TermWin_TotalWidth() - 2, 0, 1, TermWin_TotalHeight() - 1);
+         }
+         if (fshadow.shadow[SHADOW_TOP_LEFT] || fshadow.shadow[SHADOW_TOP] || fshadow.shadow[SHADOW_TOP_RIGHT]) {
+             XCopyArea(Xdisplay, pmap, buffer_pixmap, TermWin.gc, 0, TermWin.internalBorder - 1, TermWin_TotalWidth() - 1, 1, 0,
+                       TermWin.internalBorder - 1);
+-            XClearArea(Xdisplay, TermWin.vt, 0, TermWin.internalBorder - 1, TermWin_TotalWidth() - 1, 1, False);
++            eterm_present_pixmap_region(0, TermWin.internalBorder - 1, TermWin_TotalWidth() - 1, 1);
+         }
+         if (fshadow.shadow[SHADOW_BOTTOM_LEFT] || fshadow.shadow[SHADOW_BOTTOM] || fshadow.shadow[SHADOW_BOTTOM_RIGHT]) {
+             XCopyArea(Xdisplay, pmap, buffer_pixmap, TermWin.gc, 0, TermWin_TotalHeight() - TermWin.internalBorder,
+                       TermWin_TotalWidth() - 1, 1, 0, TermWin_TotalHeight() - TermWin.internalBorder);
+-            XClearArea(Xdisplay, TermWin.vt, 0, TermWin_TotalHeight() - TermWin.internalBorder, TermWin_TotalWidth() - 1, 1, False);
++            eterm_present_pixmap_region(0, TermWin_TotalHeight() - TermWin.internalBorder, TermWin_TotalWidth() - 1, 1);
+         }
+     } else {
+         if (fshadow.shadow[SHADOW_TOP_LEFT] || fshadow.shadow[SHADOW_LEFT] || fshadow.shadow[SHADOW_BOTTOM_LEFT]) {
+@@ -2232,88 +3289,65 @@ scr_refresh(int type)
+     PROF_TIME(scr_refresh);
+ }
+ 
++/* Compare an ASCII byte string against adjacent screen cells.
++ * Full UTF-8 scrollback search will be added after width handling.
++ */
+ int
+ scr_strmatch(unsigned long row, unsigned long col, const char *str)
+ {
+-    unsigned char c;
+-    const char *s;
+-
+-    for (c = screen.text[row][col], s = str; s; s++) {
+-        if (c != *s) {
+-            return (0);
+-        }
++    unsigned long cols = TERM_WINDOW_GET_REPORTED_COLS();
++    if (!str || !screen.text[row])
++        return 0;
++    while (*str) {
++        if (col >= cols || screen.text[row][col++] != (unsigned char)*str++)
++            return 0;
+     }
+     return 1;
+ }
+ 
+-/* Find and highlight all occurances of "str" in the scrollback. */
+ void
+ scr_search_scrollback(char *str)
+ {
+-    unsigned char *c;
+-    char *s;
+     static char *last_str = NULL;
+-    unsigned int *i;
+-    unsigned long row, lrow, col, rows, cols, len, k;
++    unsigned long row, col, i, rows, cols, len, first_hit;
+ 
+     if (!str) {
+-        if (!(str = last_str)) {
++        if (!last_str)
+             return;
+-        }
++        str = last_str;
+     } else {
++        if (last_str)
++            FREE(last_str);
+         last_str = STRDUP(str);
+     }
+-    lrow = rows = TERM_WINDOW_GET_REPORTED_ROWS() + TermWin.saveLines;
++    rows = TERM_WINDOW_GET_REPORTED_ROWS() + TermWin.saveLines;
+     cols = TERM_WINDOW_GET_REPORTED_COLS();
+     len = strlen(str);
+-
+-    D_SCREEN(("%d, %d\n", rows, cols));
++    if (!len || len > cols)
++        return;
++    first_hit = rows;
+     for (row = 0; row < rows; row++) {
+-        if (screen.text[row]) {
+-            c = screen.text[row];
+-            for (s = strstr(c, str); s; s = strstr(s + 1, str)) {
+-                unsigned long j;
+-
+-                col = (long) s - (long) c;
+-                for (i = screen.rend[row] + col, j = 0; j < len; i++, j++) {
+-                    if (*i & RS_RVid) {
+-                        *i &= ~RS_RVid;
+-                    } else {
+-                        *i |= RS_RVid;
+-                    }
+-                }
+-                if ((long) row <= TermWin.saveLines) {
+-                    lrow = row;
+-                }
+-            }
+-            for (s = screen.text[row] + cols - len + 1, k = len - 1; k; s++, k--) {
+-                unsigned long j;
+-
+-                if ((row < rows - 1) && !strncasecmp(s, str, k) && screen.text[row + 1]
+-                    && !strncasecmp(screen.text[row + 1], str + k, len - k)) {
+-                    col = (long) s - (long) c;
+-                    for (i = &(screen.rend[row][cols - k]), j = 0; j < k; i++, j++) {
+-                        (*i & RS_RVid) ? (*i &= ~RS_RVid) : (*i |= RS_RVid);
+-                    }
+-                    for (i = screen.rend[row + 1], j = 0, k = len - k; j < k; i++, j++) {
+-                        (*i & RS_RVid) ? (*i &= ~RS_RVid) : (*i |= RS_RVid);
+-                    }
+-                    if ((long) row <= TermWin.saveLines) {
+-                        lrow = row;
+-                    }
++        if (!screen.text[row])
++            continue;
++        for (col = 0; col + len <= cols; col++) {
++            for (i = 0; i < len; i++) {
++                text_t cp = screen.text[row][col + i];
++                unsigned char needle = (unsigned char) str[i];
++                if (cp > 127 || tolower((unsigned char) cp) != tolower(needle))
+                     break;
+-                }
++            }
++            if (i == len) {
++                for (i = 0; i < len; i++)
++                    screen.rend[row][col + i] ^= RS_RVid;
++                if (row <= TermWin.saveLines && first_hit == rows)
++                    first_hit = row;
++                col += len - 1;
+             }
+         }
+     }
+-    if (last_str == str) {
+-        FREE(last_str);
+-    } else {
+-        if (lrow != rows) {
+-            TermWin.view_start = rows - lrow - TERM_WINDOW_GET_REPORTED_ROWS();
+-            BOUND(TermWin.view_start, 0, TermWin.nscrolled);
+-            D_SCREEN(("New view start is %d\n", TermWin.view_start));
+-        }
++    if (first_hit != rows) {
++        TermWin.view_start = rows - first_hit - TERM_WINDOW_GET_REPORTED_ROWS();
++        BOUND(TermWin.view_start, 0, TermWin.nscrolled);
+     }
+     scr_refresh(refresh_type);
+ }
+@@ -2322,7 +3356,7 @@ scr_search_scrollback(char *str)
+ void
+ scr_dump(void)
+ {
+-    unsigned char *c;
++    text_t *c;
+     unsigned int *i;
+     unsigned long row, col, rows, cols;
+ 
+@@ -2334,11 +3368,11 @@ scr_dump(void)
+         fprintf(stderr, "%lu:  ", row);
+         if (screen.text[row]) {
+             for (col = 0, c = screen.text[row]; col < cols; c++, col++) {
+-                fprintf(stderr, "%02x ", *c);
++                fprintf(stderr, "%08x ", (unsigned int)*c);
+             }
+             fprintf(stderr, "\"");
+             for (col = 0, c = screen.text[row]; col < cols; c++, col++) {
+-                fprintf(stderr, "%c", ((isprint(*c)) ? (*c) : '.'));
++                fprintf(stderr, "%c", ((*c <= 127 && isprint((unsigned char)*c)) ? (int)*c : '.'));
+             }
+             fprintf(stderr, "\"");
+             for (col = 0, i = screen.rend[row]; col < cols; i++, col++) {
+@@ -2357,7 +3391,8 @@ void
+ scr_dump_to_file(const char *fname)
+ {
+     int outfd;
+-    char *buff, *src, *dest;
++    char *buff, *dest;
++    text_t *src;
+     unsigned long row, col, rows, cols;
+     struct stat st;
+ 
+@@ -2385,13 +3420,13 @@ scr_dump_to_file(const char *fname)
+         close(outfd);
+         return;
+     }
+-    buff = MALLOC(cols + 1);
++    buff = MALLOC(4 * cols + 2);
+     for (row = 0; row < rows; row++) {
+         if (screen.text[row]) {
+-            for (src = screen.text[row], dest = buff, col = 0; col < cols; col++)
+-                *dest++ = *src++;
++            for (src = screen.text[row], dest = buff, col = 0; col < cols; col++, src++)
++                if (*src != ETERM_WIDE_TRAIL)
++                    dest += eterm_encode_utf8(*src, dest);
+             *dest++ = '\n';
+-            *dest = 0;
+             write(outfd, buff, dest - buff);
+         }
+     }
+@@ -2515,8 +3550,8 @@ selection_fetch(Window win, unsigned prop, int delete)
+             XSelectInput(Xdisplay, TermWin.vt, TermWin.mask);
+             return;
+         }
+-        if (actual_type == XA_STRING) {
+-            /* We can handle strings directly. */
++        if (actual_type == XA_STRING || actual_type == props[PROP_UTF8_STRING]) {
++            /* UTF8_STRING is already UTF-8 bytes; don't reinterpret it. */
+             selection_write(data, nitems);
+         } else if (actual_type == props[PROP_SELECTION_INCR]) {
+             D_SELECT(("Incremental selection transfer initiated.  Length is at least %u bytes.\n",
+@@ -2556,54 +3591,69 @@ selection_fetch(Window win, unsigned prop, int delete)
+ void
+ selection_copy_string(Atom sel, char *str, size_t len)
+ {
+-    D_SELECT(("Copying %ul bytes from 0x%08x to selection %d\n", len, str, (int) sel));
+     if (!str || len == 0) {
+         return;
+     }
++    if (sel == props[PROP_CLIPBOARD]) {
++        unsigned char *snapshot = (unsigned char *) MALLOC(len + 1);
++        if (!snapshot) {
++            return;
++        }
++        memcpy(snapshot, str, len);
++        snapshot[len] = 0;
++        selection_clipboard_lost();
++        eterm_clipboard_text = snapshot;
++        eterm_clipboard_len = len;
++    }
+     if (IS_SELECTION(sel)) {
+-        D_SELECT(("Changing ownership of selection %d to my window 0x%08x\n", (int) sel, (int) TermWin.vt));
+         XSetSelectionOwner(Xdisplay, sel, TermWin.vt, CurrentTime);
+         if (XGetSelectionOwner(Xdisplay, sel) != TermWin.vt) {
+             libast_print_error("Can't take ownership of selection\n");
++            if (sel == props[PROP_CLIPBOARD]) {
++                selection_clipboard_lost();
++            }
+         }
+     } else {
+-        D_SELECT(("Copying selection to cut buffer %d\n", (int) sel));
+-        XChangeProperty(Xdisplay, Xroot, sel, XA_STRING, 8, PropModeReplace, str, len);
++        XChangeProperty(Xdisplay, Xroot, sel, XA_STRING, 8,
++                        PropModeReplace, (unsigned char *) str, (int) len);
+     }
+ }
+ 
+-/* Copy the currently-selected text to the buffer specified. */
++/* Copy currently highlighted screen text. Ctrl+Insert snapshots it. */
+ void
+ selection_copy(Atom sel)
+ {
+-    selection_copy_string(sel, selection.text, selection.len);
++    selection_copy_string(sel, (char *) selection.text, selection.len);
+ }
+ 
+-/* Paste the specified selection from the specified buffer. */
++/* Use CLIPBOARD for keyboard paste; PRIMARY continues to serve middle-click. */
+ void
+ selection_paste(Atom sel)
+ {
+-    D_SELECT(("Attempting to paste selection %d.\n", (int) sel));
+-    if (selection.text) {
+-        /* If we have a selection of our own, paste it. */
+-        D_SELECT(("Pasting my current selection of length %lu\n", selection.len));
+-        selection_write(selection.text, selection.len);
+-    } else if (IS_SELECTION(sel)) {
+-        /* Request the current selection be converted to the appropriate
+-           form (usually XA_STRING) and save it for us in the VT_SELECTION
+-           property.  We'll then get a SelectionNotify. */
+-        D_SELECT(("Requesting current selection (%d) -> VT_SELECTION (%d)\n", sel, props[PROP_SELECTION_DEST]));
+-#if defined(MULTI_CHARSET)
+-        if (encoding_method != LATIN1) {
+-            XConvertSelection(Xdisplay, sel, props[PROP_COMPOUND_TEXT], props[PROP_SELECTION_DEST], TermWin.vt, CurrentTime);
+-        } else {
+-            XConvertSelection(Xdisplay, sel, XA_STRING, props[PROP_SELECTION_DEST], TermWin.vt, CurrentTime);
++    if (IS_SELECTION(sel)) {
++        Window owner = XGetSelectionOwner(Xdisplay, sel);
++        if (owner == TermWin.vt) {
++            if (sel == props[PROP_CLIPBOARD]) {
++                if (eterm_clipboard_text && eterm_clipboard_len) {
++                    selection_write(eterm_clipboard_text, eterm_clipboard_len);
++                }
++            } else if (selection.text && selection.len) {
++                selection_write((unsigned char *) selection.text, selection.len);
++            }
++            return;
+         }
+-#else
+-        XConvertSelection(Xdisplay, sel, XA_STRING, props[PROP_SELECTION_DEST], TermWin.vt, CurrentTime);
+-#endif
++        if (owner == None) {
++            /* An empty CLIPBOARD can still fall back to a PRIMARY selection. */
++            if (sel == props[PROP_CLIPBOARD]) {
++                selection_paste(XA_PRIMARY);
++            }
++            return;
++        }
++        /* Request UTF-8 as raw bytes.  An owner that doesn't support it
++         * triggers an XA_STRING retry via handle_selection_notify(). */
++        XConvertSelection(Xdisplay, sel, props[PROP_UTF8_STRING],
++                          props[PROP_SELECTION_DEST], TermWin.vt, CurrentTime);
+     } else {
+-        D_SELECT(("Pasting cut buffer %d.\n", (int) sel));
+         selection_fetch(Xroot, sel, False);
+     }
+ }
+@@ -2737,8 +3787,8 @@ void
+ selection_make(Time tm)
+ {
+     int i, col, end_col, row, end_row;
+-    text_t *new_selection_text;
+-    char *str;
++    unsigned char *new_selection_text;
++    char *str, *row_start;
+     text_t *t;
+ 
+     D_SELECT(("selection.op=%d, selection.clicks=%d\n", selection.op, selection.clicks));
+@@ -2766,7 +3816,8 @@ selection_make(Time tm)
+         return;
+     }
+     i = (selection.end.row - selection.beg.row + 1) * (TERM_WINDOW_GET_REPORTED_COLS() + 1) + 1;
+-    str = MALLOC(i * sizeof(char));
++    /* Worst case: 4 UTF-8 bytes per cell, plus newline and terminator. */
++    str = MALLOC((size_t)i * 4 + 1);
+     new_selection_text = (unsigned char *) str;
+ 
+     col = MAX(selection.beg.col, 0);
+@@ -2779,13 +3830,15 @@ selection_make(Time tm)
+         t = &(screen.text[row][col]);
+         if ((end_col = screen.text[row][TERM_WINDOW_GET_REPORTED_COLS()]) == WRAP_CHAR)
+             end_col = TERM_WINDOW_GET_REPORTED_COLS();
+-        for (; col < end_col; col++)
+-            *str++ = *t++;
++        row_start = str;
++        for (; col < end_col; col++, t++)
++            if (*t != ETERM_WIDE_TRAIL)
++                str += eterm_encode_utf8(*t, str);
+         col = 0;
+         if (screen.text[row][TERM_WINDOW_GET_REPORTED_COLS()] != WRAP_CHAR) {
+             if (!(BITFIELD_IS_SET(eterm_options, ETERM_OPTIONS_SELECT_TRAILING_SPACES))) {
+-                for (str--; *str == ' ' || *str == '\t'; str--);
+-                str++;
++                while (str > row_start && (str[-1] == ' ' || str[-1] == '\t'))
++                    str--;
+             }
+             *str++ = '\n';
+         }
+@@ -2801,11 +3854,13 @@ selection_make(Time tm)
+     } else
+         i = 1;
+     UPPER_BOUND(end_col, TERM_WINDOW_GET_REPORTED_COLS());
+-    for (; col < end_col; col++)
+-        *str++ = *t++;
++    row_start = str;
++    for (; col < end_col; col++, t++)
++        if (*t != ETERM_WIDE_TRAIL)
++            str += eterm_encode_utf8(*t, str);
+     if (!(BITFIELD_IS_SET(eterm_options, ETERM_OPTIONS_SELECT_TRAILING_SPACES))) {
+-        for (str--; *str == ' ' || *str == '\t'; str--);
+-        str++;
++        while (str > row_start && (str[-1] == ' ' || str[-1] == '\t'))
++            str--;
+     }
+     if (i)
+         *str++ = '\n';
+@@ -2857,9 +3912,9 @@ selection_click(int clicks, int x, int y)
+ 
+ /* what do we want: spaces/tabs are delimiters or cutchars or non-cutchars */
+ #ifdef CUTCHAR_OPTION
+-#  define DELIMIT_TEXT(x) (strchr((rs_cutchars ? rs_cutchars : CUTCHARS), (x)))
++#  define DELIMIT_TEXT(x) (((x) <= 255) ? strchr((rs_cutchars ? rs_cutchars : CUTCHARS), (int)(x)) : NULL)
+ #else
+-#  define DELIMIT_TEXT(x) (strchr(CUTCHARS, (x)))
++#  define DELIMIT_TEXT(x) (((x) <= 255) ? strchr(CUTCHARS, (int)(x)) : NULL)
+ #endif
+ #ifdef MULTI_CHARSET
+ #define DELIMIT_REND(x)	(((x) & RS_multiMask) ? 1 : 0)
+@@ -3324,7 +4379,19 @@ void
+ selection_send(XSelectionRequestEvent * rq)
+ {
+     XEvent ev;
+-    long target_list[2];
++    Atom property = (rq->property != None) ? rq->property : rq->target;
++    long target_list[3];
++    unsigned char *value;
++    size_t value_len;
++
++    /* The two X11 selections are independent. */
++    if (rq->selection == props[PROP_CLIPBOARD]) {
++        value = eterm_clipboard_text;
++        value_len = eterm_clipboard_len;
++    } else {
++        value = (unsigned char *) selection.text;
++        value_len = selection.len;
++    }
+ 
+     ev.xselection.type = SelectionNotify;
+     ev.xselection.property = None;
+@@ -3334,50 +4401,37 @@ selection_send(XSelectionRequestEvent * rq)
+     ev.xselection.target = rq->target;
+     ev.xselection.time = rq->time;
+ 
+-    if (rq->target == props[PROP_SELECTION_TARGETS]) {
+-        target_list[0] = props[PROP_SELECTION_TARGETS];
+-        target_list[1] = XA_STRING;
+-        XChangeProperty(Xdisplay, rq->requestor, rq->property, rq->target,
+-                        32, PropModeReplace, (unsigned char *) target_list,
+-                        (sizeof(target_list) / sizeof(target_list[0])));
+-        ev.xselection.property = rq->property;
+-#ifdef MULTI_CHARSET
+-#  ifdef X_HAVE_UTF8_STRING
+-    } else if (rq->target == props[PROP_UTF8_STRING]) {
+-        XTextProperty xtextp;
+-        char *l[1];
+-
+-        *l = selection.text;
+-        xtextp.value = NULL;
+-        xtextp.nitems = 0;
+-        if (XmbTextListToTextProperty(Xdisplay, l, 1, XUTF8StringStyle, &xtextp) == Success) {
+-            if (xtextp.nitems > 0 && xtextp.value) {
+-                XChangeProperty(Xdisplay, rq->requestor, rq->property,
+-                                rq->target, 8, PropModeReplace, xtextp.value, xtextp.nitems);
+-                ev.xselection.property = rq->property;
+-                XFree(xtextp.value);
+-            }
+-        }
+-#  endif /* X_HAVE_UTF8_STRING */
+-    } else if (rq->target == props[PROP_TEXT] || rq->target == props[PROP_COMPOUND_TEXT]) {
+-        XTextProperty xtextp;
+-        char *l[1];
+-
+-        *l = selection.text;
+-        xtextp.value = NULL;
+-        xtextp.nitems = 0;
+-        if (XmbTextListToTextProperty(Xdisplay, l, 1, XCompoundTextStyle, &xtextp) == Success) {
+-            if (xtextp.nitems > 0 && xtextp.value) {
+-                XChangeProperty(Xdisplay, rq->requestor, rq->property, props[PROP_COMPOUND_TEXT],
+-                                8, PropModeReplace, xtextp.value, xtextp.nitems);
+-                ev.xselection.property = rq->property;
+-                XFree(xtextp.value);
++    if (value != NULL && value_len > 0) {
++        if (rq->target == props[PROP_SELECTION_TARGETS]) {
++            target_list[0] = props[PROP_SELECTION_TARGETS];
++            target_list[1] = props[PROP_UTF8_STRING];
++            target_list[2] = XA_STRING;
++            XChangeProperty(Xdisplay, rq->requestor, property, XA_ATOM,
++                            32, PropModeReplace,
++                            (unsigned char *) target_list, 3);
++            ev.xselection.property = property;
++        } else if (rq->target == props[PROP_UTF8_STRING] || rq->target == XA_STRING) {
++            XChangeProperty(Xdisplay, rq->requestor, property, rq->target,
++                            8, PropModeReplace, value, (int) value_len);
++            ev.xselection.property = property;
++        } else if (rq->target == props[PROP_TEXT] ||
++                   rq->target == props[PROP_COMPOUND_TEXT]) {
++            XTextProperty xtextp;
++            char *l[1];
++            l[0] = (char *) value;
++            xtextp.value = NULL;
++            xtextp.nitems = 0;
++            if (XmbTextListToTextProperty(Xdisplay, l, 1, XCompoundTextStyle,
++                                          &xtextp) == Success) {
++                if (xtextp.nitems > 0 && xtextp.value) {
++                    XChangeProperty(Xdisplay, rq->requestor, property,
++                                    props[PROP_COMPOUND_TEXT], 8,
++                                    PropModeReplace, xtextp.value, xtextp.nitems);
++                    ev.xselection.property = property;
++                    XFree(xtextp.value);
++                }
+             }
+         }
+-#endif /* MULTI_CHARSET */
+-    } else {
+-        XChangeProperty(Xdisplay, rq->requestor, rq->property, XA_STRING, 8, PropModeReplace, selection.text, selection.len);
+-        ev.xselection.property = rq->property;
+     }
+     XSendEvent(Xdisplay, rq->requestor, False, 0, &ev);
+ }
+@@ -3431,6 +4485,62 @@ mouse_report(XButtonEvent * ev)
+               (32 + Pixel2Row(ev->y) + 1));
+ }
+ 
++/* DECSET 1006 (SGR) and 1002 (button-motion) reporting.
++ * release: true for button release; motion: true for held-button movement.
++ */
++void
++mouse_report_extended(XButtonEvent *ev, int release, int motion)
++{
++    int button_number;
++    int modifiers = 0;
++    int col = Pixel2Col(ev->x) + 1;
++    int row = Pixel2Row(ev->y) + 1;
++
++    switch (ev->button) {
++        case Button1:
++        case Button2:
++        case Button3:
++            button_number = ev->button - Button1;
++            break;
++        case Button4:
++        case Button5:
++            button_number = 64 + ev->button - Button4;
++            break;
++        default:
++            return;
++    }
++    if (ev->state & ShiftMask)
++        modifiers |= 4;
++    if (ev->state & Mod1Mask)
++        modifiers |= 8;
++    if (ev->state & ControlMask)
++        modifiers |= 16;
++    if (motion)
++        modifiers |= 32;
++    if (col < 1)
++        col = 1;
++    if (row < 1)
++        row = 1;
++    if (col > TERM_WINDOW_GET_REPORTED_COLS())
++        col = TERM_WINDOW_GET_REPORTED_COLS();
++    if (row > TERM_WINDOW_GET_REPORTED_ROWS())
++        row = TERM_WINDOW_GET_REPORTED_ROWS();
++
++    if (PrivateModes & PrivMode_MouseSGR) {
++        tt_printf((unsigned char *) "\033[<%d;%d;%d%c",
++                  button_number | modifiers, col, row, release ? 'm' : 'M');
++    } else {
++        if (release)
++            button_number = 3;
++        if (col > 223)
++            col = 223;
++        if (row > 223)
++            row = 223;
++        tt_printf((unsigned char *) "\033[M%c%c%c",
++                  32 + (button_number | modifiers), 32 + col, 32 + row);
++    }
++}
++
+ void
+ debug_colors(void)
+ {
+diff --git a/src/screen.h b/src/screen.h
+index 21336b3..34440d5 100644
+--- a/src/screen.h
++++ b/src/screen.h
+@@ -155,7 +155,10 @@ enum {
+    many lines back into the scrollback buffer the currently-visible data
+    is.  (0 means we're at the bottom and not in scrollback.)
+ */
+-typedef unsigned char text_t;
++#include <stdint.h>
++typedef uint32_t text_t;
++/* Internal second cell of a two-column Unicode scalar; never valid UTF-8. */
++#define ETERM_WIDE_TRAIL ((text_t) 0x110000u)
+ typedef unsigned int rend_t;
+ typedef enum {
+     SELECTION_CLEAR = 0,
+@@ -165,7 +168,7 @@ typedef enum {
+     SELECTION_DONE
+ } selection_op_t;
+ typedef enum {
+-    LATIN1 = 0, UCS2, EUCJ, EUCKR = EUCJ, GB = EUCJ, SJIS, BIG5
++    LATIN1 = 0, UCS2, EUCJ, EUCKR = EUCJ, GB = EUCJ, SJIS, BIG5, UTF8
+ } encoding_t;
+ typedef struct {
+     short row, col;
+@@ -218,7 +221,7 @@ typedef struct {
+    -TermWin.nscrolled <= beg.row <= mark.row <= end.row < TermWin.nrow
+ */
+ typedef struct {
+-    text_t  *text;
++    unsigned char *text;  /* UTF-8 encoded selection, not screen cells */
+     int len;
+     selection_op_t op;
+     unsigned short screen:1;
+@@ -289,6 +292,7 @@ extern void selection_write(unsigned char *, size_t);
+ extern void selection_fetch(Window, unsigned, int);
+ extern void selection_copy_string(Atom, char *, size_t);
+ extern void selection_copy(Atom);
++extern void selection_clipboard_lost(void);
+ extern void selection_paste(Atom);
+ extern void selection_reset(void);
+ extern void selection_clear(void);
+@@ -303,6 +307,7 @@ extern void selection_extend_colrow(int, int, int, int);
+ extern void selection_rotate(int, int);
+ extern void selection_send(XSelectionRequestEvent *);
+ extern void mouse_report(XButtonEvent *);
++extern void mouse_report_extended(XButtonEvent *, int, int);
+ extern void twin_mouse_drag_report(XButtonEvent *);
+ extern void mouse_tracking(int, int, int, int, int);
+ extern void debug_colors(void);
+diff --git a/src/term.c b/src/term.c
+index 11b84fe..66a9423 100644
+--- a/src/term.c
++++ b/src/term.c
+@@ -336,7 +336,102 @@ char *def_colorName[] = {
+     NULL, NULL                  /* pointerColor, borderColor */
+ };
+ char *rs_color[NRS_COLORS];
+-Pixel PixColors[NRS_COLORS + EXTRA_COLORS];
++Pixel PixColors[ETERM_COLOR_STORAGE];
++
++/* RGB palette slots are immutable while cells can reference them: recycling
++ * would change the color of already-rendered text and existing scrollback.
++ * No dynamic allocations are freed during the terminal's lifetime. */
++static unsigned int eterm_rgb_next = TOTAL_COLORS;
++static unsigned int eterm_rgb_values[ETERM_COLOR_STORAGE];
++static unsigned char eterm_rgb_base_valid[256];
++static unsigned int eterm_rgb_base_values[256];
++static int eterm_rgb_base_cached = 0;
++
++static unsigned long
++eterm_rgb_distance(unsigned int a, unsigned int b)
++{
++    long dr = (long) ((a >> 16) & 255) - (long) ((b >> 16) & 255);
++    long dg = (long) ((a >> 8) & 255) - (long) ((b >> 8) & 255);
++    long db = (long) (a & 255) - (long) (b & 255);
++    return (unsigned long) (dr * dr + dg * dg + db * db);
++}
++
++/* When a screen needs more than the finite number of distinct RGB colors,
++ * approximate with a stable existing palette entry. Keep its contents
++ * immutable so existing saved cells do not change appearance. */
++static unsigned int
++eterm_rgb_nearest(unsigned int rgb)
++{
++    unsigned int idx, best = 7;
++    unsigned long distance, smallest = ULONG_MAX;
++    XColor xcolor;
++
++    if (!eterm_rgb_base_cached) {
++        for (idx = 0; idx < 256; ++idx) {
++            xcolor.pixel = PixColors[idx];
++            if (XQueryColor(Xdisplay, cmap, &xcolor)) {
++                eterm_rgb_base_valid[idx] = 1;
++                eterm_rgb_base_values[idx] =
++                    (((unsigned int) (xcolor.red >> 8)) << 16) |
++                    (((unsigned int) (xcolor.green >> 8)) << 8) |
++                    ((unsigned int) (xcolor.blue >> 8));
++            }
++        }
++        eterm_rgb_base_cached = 1;
++    }
++    for (idx = 0; idx < 256; ++idx) {
++        if (!eterm_rgb_base_valid[idx])
++            continue;
++        distance = eterm_rgb_distance(rgb, eterm_rgb_base_values[idx]);
++        if (distance < smallest) {
++            smallest = distance;
++            best = idx;
++        }
++    }
++    for (idx = TOTAL_COLORS; idx < eterm_rgb_next; ++idx) {
++        distance = eterm_rgb_distance(rgb, eterm_rgb_values[idx]);
++        if (distance < smallest) {
++            smallest = distance;
++            best = idx;
++        }
++    }
++    return best;
++}
++
++/* Returns a rendition-safe 9-bit color index. Does not advertise truecolor
++ * terminfo: this bounded cache cannot represent an unlimited RGB image. */
++static unsigned int
++eterm_rgb_color(unsigned int red, unsigned int green, unsigned int blue)
++{
++    unsigned int idx, rgb;
++    XColor xcolor;
++
++    if (red > 255 || green > 255 || blue > 255)
++        return fgColor;
++    if (Xdepth <= 2)
++        return fgColor;
++    rgb = (red << 16) | (green << 8) | blue;
++
++    for (idx = TOTAL_COLORS; idx < eterm_rgb_next; ++idx) {
++        if (eterm_rgb_values[idx] == rgb)
++            return idx;
++    }
++    if (eterm_rgb_next >= ETERM_COLOR_STORAGE ||
++        eterm_rgb_next >= 512) /* 9-bit color masks in screen.h */
++        return eterm_rgb_nearest(rgb);
++
++    xcolor.red = (unsigned short) (red * 257);
++    xcolor.green = (unsigned short) (green * 257);
++    xcolor.blue = (unsigned short) (blue * 257);
++    xcolor.flags = DoRed | DoGreen | DoBlue;
++    if (!XAllocColor(Xdisplay, cmap, &xcolor))
++        return eterm_rgb_nearest(rgb);
++
++    idx = eterm_rgb_next++;
++    eterm_rgb_values[idx] = rgb;
++    PixColors[idx] = xcolor.pixel;
++    return idx;
++}
+ unsigned int MetaMask = 0, AltMask = 0, NumLockMask = 0;
+ unsigned int modmasks[] = { Mod1Mask, Mod2Mask, Mod3Mask, Mod4Mask, Mod5Mask };
+ 
+@@ -530,6 +625,24 @@ lookup_key(XEvent * ev)
+     if (valid_keysym) {
+ #endif
+ 
++        /* Modern insert-key clipboard shortcuts.  Keep other keybindings and
++         * ordinary Insert untouched.  The keypad Insert keysym is supported.
++         * Use CLIPBOARD, not PRIMARY, for both shortcuts. */
++        if ((keysym == XK_Insert
++#ifdef XK_KP_Insert
++             || keysym == XK_KP_Insert
++#endif
++            ) && !meta && !(ev->xkey.state & Mod1Mask)) {
++            if (ctrl && !shft) {
++                selection_copy(props[PROP_CLIPBOARD]);
++                LK_RET();
++            }
++            if (shft && !ctrl) {
++                selection_paste(props[PROP_CLIPBOARD]);
++                LK_RET();
++            }
++        }
++
+         /* Check for a corresponding action binding.  If there is one, we're done with this event. */
+         if (action_dispatch(ev, keysym)) {
+             LK_RET();
+@@ -602,8 +715,8 @@ lookup_key(XEvent * ev)
+                         }
+                         break;
+ 
+-                    case XK_Insert:    /* Shift-Ins pastes the current selection. */
+-                        selection_paste(XA_PRIMARY);
++                    case XK_Insert:    /* Shift-Ins pastes the CLIPBOARD. */
++                        selection_paste(props[PROP_CLIPBOARD]);
+                         LK_RET();
+                         break;
+ 
+@@ -1756,7 +1869,7 @@ process_terminal_mode(int mode, int priv, unsigned int nargs, int arg[])
+                         PrivCases(PrivMode_MouseX10);
+                         /* orthogonal */
+                         if (PrivateModes & PrivMode_MouseX10)
+-                            PrivateModes &= ~(PrivMode_MouseX11);
++                            PrivateModes &= ~(PrivMode_MouseX11 | PrivMode_MouseDrag);
+                         break;
+ 
+                     case 25:   /* visible/invisible cursor */
+@@ -1794,10 +1907,18 @@ process_terminal_mode(int mode, int priv, unsigned int nargs, int arg[])
+                         PrivCases(PrivMode_MouseX11);
+                         /* orthogonal */
+                         if (PrivateModes & PrivMode_MouseX11)
+-                            PrivateModes &= ~(PrivMode_MouseX10);
++                            PrivateModes &= ~(PrivMode_MouseX10 | PrivMode_MouseDrag);
+                         break;
+ 
+-#if 0
++case 1002: /* button motion / drag reporting */
++                        PrivCases(PrivMode_MouseDrag);
++                        if (PrivateModes & PrivMode_MouseDrag)
++                            PrivateModes &= ~(PrivMode_MouseX10 | PrivMode_MouseX11);
++                        break;
++                    case 1006: /* SGR mouse encoding */
++                        PrivCases(PrivMode_MouseSGR);
++                        break;
++                    #if 0
+                     case 1001:
+                         break;  /* X11 mouse highlighting */
+ #endif
+@@ -1909,12 +2030,35 @@ process_sgr_mode(unsigned int nargs, int arg[])
+                 scr_color(minColor + (arg[i] - 30), RS_Bold);
+                 break;
+             case 38:
+-                if (arg[i + 1] == 5) {
+-                    i += 2;
+-                    if (arg[i] >= 0 && arg[i] < 256)
+-                        scr_color(arg[i], RS_Bold);
++            case 48: {
++                /* Parse complete SGR color groups; never read past nargs.
++                 * 38/48;5;n  = palette, 38/48;2;r;g;b = direct RGB.
++                 */
++                unsigned int target = (arg[i] == 38) ? RS_Bold : RS_Blink;
++                if (i + 1 < nargs && arg[i + 1] == 5) {
++                    if (i + 2 < nargs) {
++                        if (arg[i + 2] >= 0 && arg[i + 2] < 256)
++                            scr_color((unsigned int) arg[i + 2], target);
++                        i += 2;
++                    } else {
++                        i = nargs;
++                    }
++                } else if (i + 1 < nargs && arg[i + 1] == 2) {
++                    if (i + 4 < nargs) {
++                        if (arg[i + 2] >= 0 && arg[i + 2] <= 255 &&
++                            arg[i + 3] >= 0 && arg[i + 3] <= 255 &&
++                            arg[i + 4] >= 0 && arg[i + 4] <= 255) {
++                            scr_color(eterm_rgb_color((unsigned int) arg[i + 2],
++                                                      (unsigned int) arg[i + 3],
++                                                      (unsigned int) arg[i + 4]), target);
++                        }
++                        i += 4;
++                    } else {
++                        i = nargs;
++                    }
+                 }
+                 break;
++            }
+                 /* default fg */
+             case 39:
+                 scr_color(restoreFG, RS_Bold);
+@@ -1931,13 +2075,7 @@ process_sgr_mode(unsigned int nargs, int arg[])
+             case 47:
+                 scr_color(minColor + (arg[i] - 40), RS_Blink);
+                 break;
+-            case 48:
+-                if (arg[i + 1] == 5) {
+-                    i += 2;
+-                    if (arg[i] >= 0 && arg[i] < 256)
+-                        scr_color(arg[i], RS_Blink);
+-                }
+-                break;
++            /* SGR 48 handled together with 38 above. */
+                 /* default bg */
+             case 49:
+                 scr_color(restoreBG, RS_Blink);
+diff --git a/src/term.h b/src/term.h
+index 8ab8fab..11d30d3 100644
+--- a/src/term.h
++++ b/src/term.h
+@@ -141,6 +141,9 @@ enum color_list {  /* Extra colors */
+ };
+ 
+ # define EXTRA_COLORS		(TOTAL_COLORS - NRS_COLORS)
++/* rend_t has only nine bits per palette index. Reserve all 512 indices,
++ * preserving the existing names and positions of theme colors. */
++#define ETERM_COLOR_STORAGE 512
+ 
+ #ifdef HOTKEY_CTRL
+ # define HOTKEY ctrl
+@@ -165,7 +168,7 @@ extern unsigned long PrivateModes;
+ extern unsigned long SavedModes;
+ extern char *def_colorName[];
+ extern char *rs_color[NRS_COLORS];
+-extern Pixel PixColors[NRS_COLORS + EXTRA_COLORS];
++extern Pixel PixColors[ETERM_COLOR_STORAGE];
+ extern unsigned int MetaMask, AltMask, NumLockMask;
+ extern unsigned int modmasks[];
+ 
+diff --git a/src/windows.h b/src/windows.h
+index edcbbb7..01d2f97 100644
+--- a/src/windows.h
++++ b/src/windows.h
+@@ -31,7 +31,7 @@
+ 
+ /************ Variables ************/
+ extern char *rs_color[NRS_COLORS];
+-extern Pixel PixColors[NRS_COLORS + EXTRA_COLORS];
++extern Pixel PixColors[ETERM_COLOR_STORAGE];
+ extern XSetWindowAttributes Attributes;
+ extern XWindowAttributes attr;
+ extern XSizeHints szHint;
