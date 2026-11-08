@@ -1,0 +1,45 @@
+--- a/src/screen.c
++++ b/src/screen.c
+@@ -1942,7 +1942,8 @@
+     register int ncols = TERM_WINDOW_GET_COLS();
+ #endif
+     int ascent, descent;
+-    unsigned char eterm_xft_dirty[MAX_COLS + 1];
++    /* One dirty flag per terminal cell, not per legacy MAX_COLS draw byte. */
++    unsigned char *eterm_xft_dirty;
+     int eterm_dirty_col;
+     int eterm_run_first_col;
+ 
+@@ -1962,6 +1963,15 @@
+     if (type == NO_REFRESH)
+         return;
+ 
++    /* Fullscreen widths may exceed MAX_COLS (250).  The bitmap draw-run
++     * buffer is deliberately capped, but Xft dirty flags are indexed by
++     * every visible column.  Size them from the current grid instead. */
++    if (ncols <= 0)
++        return;
++    eterm_xft_dirty = MALLOC((size_t) ncols);
++    if (!eterm_xft_dirty)
++        return;
++
+     if (buffer_pixmap) {
+         draw_buffer = buffer_pixmap;
+     } else {
+@@ -2024,7 +2034,7 @@
+         srp = screen.rend[scrrow];
+         dtp = drawn_text[row];
+         drp = drawn_rend[row];
+-        MEMSET(eterm_xft_dirty, 0, sizeof(eterm_xft_dirty));
++        MEMSET(eterm_xft_dirty, 0, (size_t) ncols);
+ 
+         for (col = 0; col < ncols; col++) {
+             if (col + 1 < ncols &&
+@@ -2537,6 +2547,7 @@
+     }
+     refresh_all = 0;
+     D_SCREEN(("Exiting.\n"));
++    FREE(eterm_xft_dirty);
+ 
+     PROF_DONE(scr_refresh);
+     PROF_TIME(scr_refresh);

@@ -12,7 +12,7 @@ _file_list=(
 pkgname=eterm
 _pkgname=Eterm
 pkgver=0.9.6
-pkgrel=28
+pkgrel=29
 _pkgrel=1
 pkgdesc="A vt102 terminal emulator intended as a replacement for xterm."
 arch=('i686' 'x86_64')
@@ -50,6 +50,9 @@ md5sums+=('6df2704df5b51709244b203703260540')
 # Optional terminfo profiles: indexed colors by default, RGB only if requested.
 source+=('eterm-modern-v26.terminfo')
 md5sums+=('6dd4b988b72027d5991b7e42dbccc340')
+# v29: size Unicode redraw bookkeeping for the real fullscreen column count.
+source+=('eterm-fullscreen-resize-v29.patch')
+md5sums+=('5b046a866f943057fdfefcb520d96295')
 
 prepare() {
     cd "${srcdir}/${_pkgname}-${pkgver}/src"
@@ -69,6 +72,10 @@ prepare() {
     patch --batch -N -p1 --fuzz=0 -i "${srcdir}/eterm-modernization-v24.patch" || return 1
     # Change only the 64-bit rendition/color handling after the verified v24 patch.
     patch --batch -N -p1 --fuzz=0 -i "${srcdir}/eterm-truecolor-v25.patch" || return 1
+
+    # Prevent fullscreen redraw from writing past the legacy 250-column
+    # stack buffer; leave the capped bitmap draw-run buffer unchanged.
+    patch --batch -N -p1 --fuzz=0 -i "${srcdir}/eterm-fullscreen-resize-v29.patch" || return 1
 
     # libast 0.7's AUR package currently installs headers at
     # /usr/include/foo.h, but libast.h asks for <libast/foo.h>.
