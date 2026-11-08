@@ -12,7 +12,7 @@ _file_list=(
 pkgname=eterm
 _pkgname=Eterm
 pkgver=0.9.6
-pkgrel=29
+pkgrel=30
 _pkgrel=1
 pkgdesc="A vt102 terminal emulator intended as a replacement for xterm."
 arch=('i686' 'x86_64')
@@ -54,6 +54,9 @@ md5sums+=('6dd4b988b72027d5991b7e42dbccc340')
 source+=('eterm-fullscreen-resize-v29.patch')
 md5sums+=('5b046a866f943057fdfefcb520d96295')
 
+# v30: synchronize PTY erase with Eterm Backspace output.
+source+=('eterm-backspace-v30.patch')
+md5sums+=('87aa4abdf30b076b4e9f0dff9422fd04')
 prepare() {
     cd "${srcdir}/${_pkgname}-${pkgver}/src"
 
@@ -77,6 +80,8 @@ prepare() {
     # stack buffer; leave the capped bitmap draw-run buffer unchanged.
     patch --batch -N -p1 --fuzz=0 -i "${srcdir}/eterm-fullscreen-resize-v29.patch" || return 1
 
+    # Keep the child PTY erase character consistent with Eterm Backspace.
+    patch --batch -N -p1 --fuzz=0 -i "${srcdir}/eterm-backspace-v30.patch" || return 1
     # libast 0.7's AUR package currently installs headers at
     # /usr/include/foo.h, but libast.h asks for <libast/foo.h>.
     # Create a build-only compatibility include directory. Never modify

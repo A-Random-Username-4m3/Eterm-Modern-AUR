@@ -1,0 +1,22 @@
+--- a/src/command.c
++++ b/src/command.c
+@@ -1776,11 +1776,9 @@
+-#if defined(FORCE_BACKSPACE) && 0
+-    PrivMode(1, PrivMode_BackSpace);
+-    tio->c_cc[VERASE] = '\b';   /* force ^H for stty setting...   */
+-    SET_TERMIOS(0, tio);        /*  ...and make it stick -- casey */
+-#elif defined(FORCE_DELETE) && 0
+-    PrivMode(0, PrivMode_BackSpace);
+-    tio->c_cc[VERASE] = 0x7f;   /* force ^? for stty setting...   */
+-    SET_TERMIOS(0, tio);        /*  ...and make it stick -- casey */
+-#else
+-    PrivMode((tio->c_cc[VERASE] == '\b'), PrivMode_BackSpace);
++    /* Keep Eterm's Backspace byte and the child PTY's VERASE synchronized.
++     * run_command() installs this termios value on the slave PTY.
++     */
++#if defined(FORCE_BACKSPACE)
++    tio->c_cc[VERASE] = '\b';
++#elif defined(FORCE_DELETE)
++    tio->c_cc[VERASE] = 0x7f;
+ #endif
++    PrivMode((tio->c_cc[VERASE] == '\b'), PrivMode_BackSpace);
